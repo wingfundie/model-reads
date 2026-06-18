@@ -1,0 +1,273 @@
+# Gas Generator Valuation & Trading Pack — Desk Specification
+
+*The analytics, data and charts that turn the cap-margin model into something a NEM trading desk understands, trusts, and trades on. Companion to the methodology document.*
+
+---
+
+## 0. How to frame the whole pack
+
+A desk reads **top-down** and acts in seconds. Structure every screen and every deck in this order, and never bury the decision below the diagnostics:
+
+```
+TIER 1  Decision & position        → what do I trade, and what's at risk?      (30 seconds)
+TIER 2  Value & risk attribution   → where does the value and the risk come from?
+TIER 3  Dispatch & physical        → does the asset behave realistically?       (the realism gate)
+TIER 4  Sensitivities & hedge      → how do I hedge it, and what moves it?
+TIER 5  Stress & scenarios         → what breaks it?
+TIER 6  Calibration & credibility  → why should I believe the number?
+TIER 7  Term structure             → how does value sit across quarters/regions?
+```
+
+**Two numbers, two measures — keep them separate.** Every output exists under one of two measures and they answer different questions. Label which is which on every chart:
+
+| Number | Measure | Used for | Audience |
+|---|---|---|---|
+| **Fair value of the cap strip** (and of the asset) | **Risk-neutral** (calibrated to ASX cap/swap) | Marking, comparing to screen, **trade decisions** | Traders |
+| **Expected realised margin + distribution** | **Physical** | Budget, expected P&L, **risk limits, VaR/CVaR** | Risk / management |
+
+Conflating them is the single most common way these models lose desk credibility. The gap between them *is* the risk premium you are earning by selling caps — show it explicitly (Tier 2).
+
+**Report per-MWh and total.** Per dispatched MWh (`$/MWh`, comparable to spark spread and across units) **and** total `$` for the book. A desk needs both lenses.
+
+---
+
+## TIER 1 — Decision & position (the headline)
+
+The screen a trader looks at first. If they only see this, they can still act.
+
+**1.1 Quarterly margin distribution — fan or histogram.**
+*Type:* fan chart across quarters (median line + P5/P25/P75/P95 bands) **or** per-quarter histogram. Overlay **CVaR(5%)** as a marked line.
+*Shows:* the full risk profile of expected realised margin per quarter — mean, dispersion, and the left tail.
+*Desk action:* sizing and limits. The tail, not the mean, sets how much cap volume is prudent. **This is the chart that justifies the whole cap framing — it must be first.**
+
+**1.2 Fair value vs market — the edge.**
+*Type:* grouped bars per quarter: **model fair-value cap premium `p*`** vs **ASX traded cap premium `p_screen`** (and the analogous swap-implied comparison). Difference labelled in `$/MWh`.
+*Shows:* where your model says caps are cheap or rich relative to the screen.
+*Desk action:* **the trade signal.** Positive `p* − p_screen` → caps look cheap to sell short at, or your asset is being under-valued by the market; negative → market is paying you more than fair for the tail you're short. This is where the desk lifts or hits.
+
+**1.3 The recommended position card.**
+*Type:* a compact table, not a chart, per quarter/region:
+
+| Field | Example |
+|---|---|
+| Caps to sell `N` | 90 MW (haircut to 100 MW nameplate for outage/start reliability) |
+| Strike | $300 (fixed) |
+| Fair premium `p*` vs screen | $21.4 vs $18.0 → **+$3.4/MWh edge** |
+| Expected carry (quarter) | $X (premium − expected payout, physical measure) |
+| Breakeven premium | $14.9/MWh (below this, don't sell) |
+| Tail (CVaR 5%) | −$Y |
+| Cap-equiv / swap-equiv delta | short 86 cap-MW + short 12 swap-MW |
+
+*Desk action:* this is the literal trade ticket the valuation implies. Everything else supports this card.
+
+**1.4 Position vs limit gauge.**
+*Type:* gauge / bar — current net short-cap MW (this asset + correlated book) against the desk's cap-position and CVaR limits, by quarter.
+*Shows:* headroom.
+*Desk action:* whether the recommended position can be added without breaching concentration or tail limits.
+
+---
+
+## TIER 2 — Value & risk attribution (where it comes from)
+
+This is the tier that **explains the methodology** to the desk and shows it isn't a black box.
+
+**2.1 Value waterfall.**
+*Type:* waterfall, per quarter:
+```
+Merchant energy margin (capture − SRMC on generated MWh)
+   + Cap premium carry            (N·p·H)
+   − Expected cap payouts         (Σ N·max(S−300,0))
+   − Commitment drag              (starts + min-load fuel)
+   − FOM
+   = Net cap-collared margin
+```
+*Shows:* the anatomy of the number — how much is energy spread vs premium carry vs what the cap leg costs vs what being available costs.
+*Desk action:* tells the desk *which lever* drives value, so they know what to watch. If premium carry dominates, the trade is a vol-selling carry trade; if energy spread dominates, it's a spark-spread asset with a cap overlay.
+
+**2.2 Risk attribution (the same waterfall, but on variance / CVaR).**
+*Type:* stacked bar — contribution of each component to total margin variance and to CVaR.
+*Shows:* where the *risk* lives, which is usually **not** where the *value* lives. Premium carry is steady; cap payouts and commitment drag carry the variance.
+*Desk action:* focuses hedging attention on the volatile legs, not the stable ones.
+
+**2.3 Capture price vs baseload vs strike — the cap-vs-swap justification.**
+*Type:* per quarter, three bars: **generation-weighted capture price `P_cap`**, **time-weighted baseload average `S̄`**, and the **$300 strike**. Annotate the **capture premium** (`P_cap − S̄`, $/MWh) the peaker earns over baseload.
+*Shows:* visually why a flat swap mis-measures a peaker — the asset realises `P_cap`, far above the `S̄` a swap references.
+*Desk action:* settles the "why not just use the swap" objection in one chart. Also flags units where `P_cap ≈ S̄` (i.e. it's really running baseload → swap *is* appropriate → use the mixed hedge).
+
+**2.4 Old method vs new method — bridge.**
+*Type:* a short waterfall bridging the previous flat-swap margin to the new cap-collared margin, with the difference decomposed (shape correction, capture-vs-baseload correction, premium carry added, commitment drag netted).
+*Shows:* exactly what changed and why, in dollars.
+*Desk action:* lets anyone who knew the old number reconcile to the new one — essential for adoption.
+
+---
+
+## TIER 3 — Dispatch & physical behaviour (the realism gate)
+
+The desk **will** challenge whether the asset can actually do what the model assumes. These charts pass or fail that test, and they are where the uncovered-tail risk becomes visible.
+
+**3.1 Dispatch profile overlaid with spot.**
+*Type:* dual-axis time series for a representative path (and a high-spike path): generation MW (area) + RRP (line), with the $300 strike and SRMC marked.
+*Shows:* when the unit runs, and whether it's online during spikes.
+*Desk action:* eyeball check that dispatch follows `S > SRMC` and that defence aligns with spikes.
+
+**3.2 Spike capture rate — the availability story.**
+*Type:* per quarter: of intervals with `S > 300`, the fraction where the unit achieved `G ≥ N` (fully covered), `0 < G < N` (partially covered), `G = 0` (**uncovered**). Stacked bar.
+*Shows:* how often the caps you're short are actually backed by generation.
+*Desk action:* **this is the single most important realism check.** A high uncovered fraction means the fair value is overstated and the CVaR is real. It directly disciplines how large `N` can prudently be.
+
+**3.3 Running hours by price band (generation-duration).**
+*Type:* histogram of generated MWh bucketed by price band (`<SRMC`, `SRMC–100`, `100–300`, `300–1000`, `>1000`, near-MPC).
+*Shows:* where in the price distribution the asset earns — concentrated in the tail for a peaker.
+*Desk action:* confirms the asset is a tail-capture instrument and shows how dependent margin is on a handful of high-price intervals (fragility).
+
+**3.4 Starts & commitment-drag distribution.**
+*Type:* histogram across paths of starts-per-quarter; alongside, **false-start rate** (started, no spike materialised) and **min-load hours**.
+*Shows:* the cost of being ready, made concrete — the commitment drag the swap model never saw.
+*Desk action:* validates the commitment policy isn't over-starting (perfect-foresight leak) or under-starting (missing defence). Large false-start rates flag an over-eager policy inflating availability.
+
+**3.5 SRMC moneyness on the price-duration curve.**
+*Type:* price-duration curve (sorted RRP, x = % of intervals) with the unit's **SRMC band** shaded across it; show how SRMC shifts as gas moves.
+*Shows:* what fraction of the year the unit is in-the-money, and how that collapses when gas rises.
+*Desk action:* the E&W "moneyness" view — tells the desk how marginal the asset is and how exposed its running hours are to gas.
+
+---
+
+## TIER 4 — Sensitivities, greeks & hedge ratios (how to hedge it)
+
+Turns the valuation into hedge instructions.
+
+**4.1 Tornado / sensitivity bars.**
+*Type:* horizontal tornado of ∂(margin) to a defined bump in each driver: **forward power level**, **gas price**, **spike vol / cap-implied vol**, **power–gas correlation**, **MLF**, **start cost**, **forced-outage rate**.
+*Shows:* what the valuation is most exposed to, ranked.
+*Desk action:* prioritises which exposures to hedge and which to monitor. Usually power level and gas dominate; correlation and MLF are the sneaky ones.
+
+**4.2 Delta curves (power & gas) vs price level.**
+*Type:* line — ∂(asset value)/∂(power forward) and ∂/∂(gas forward) as a function of the forward level. Show the **low, rising ATM delta** characteristic of a peaker.
+*Shows:* the dynamic hedge ratio — small near current forwards, rising as the asset moves into the money.
+*Desk action:* sets the delta hedge and tells the desk how much it will need to **rebalance** as forwards move (the gamma).
+
+**4.3 Cap-equivalent and swap-equivalent replication.**
+*Type:* per quarter: the asset's sensitivity expressed as **equivalent short-cap MW** + **equivalent swap MW** that replicate its forward greeks.
+*Shows:* "this asset ≈ short `N_eq` caps + `V_eq` swaps."
+*Desk action:* **the hedge construction.** The desk hedges the residual after the natural cap-short, in tradeable instruments.
+
+**4.4 Vega to cap-implied vol.**
+*Type:* bar per quarter — sensitivity to the implied vol embedded in cap premiums.
+*Shows:* the asset is **short vol** (it sold the tail). Quantifies by how much.
+*Desk action:* if the desk wants to be vol-neutral, this sizes the offsetting vol position; if it wants the carry, this is the deliberate exposure.
+
+---
+
+## TIER 5 — Stress & scenarios (what breaks it)
+
+Deterministic shocks the desk reasons about directly. A grid, not a fan.
+
+**5.1 Scenario impact table / heatmap.**
+*Type:* table or heatmap of margin impact (mean and CVaR) for each named scenario:
+
+| Scenario | Why it matters in the NEM |
+|---|---|
+| Gas spike +$X/GJ | SRMC rises; defence margin compresses |
+| **Gas–power co-spike** | SRMC moves against you *exactly when caps pay* — the signature peaker risk |
+| Heatwave (spike frequency ×2) | more cap payouts; tests whether you're net long or short the tail |
+| Prolonged scarcity → **APC binds ($600)** | sustained high prices truncated; caps-short capped on the upside too |
+| Forced outage during a spike | the **uncovered-tail realisation** — pure loss at near-MPC |
+| MLF cut | covered-defence leakage `(1−L)·S` widens |
+| Low-price / mild summer | premium carry intact, energy spread evaporates |
+
+*Shows:* discrete, explainable failure modes.
+*Desk action:* sets stop-losses, informs `N` sizing, and tells the desk which scenarios it is implicitly betting against.
+
+**5.2 Tail decomposition (CVaR by cause).**
+*Type:* stacked bar — contribution to CVaR(5%) by scenario type (uncovered spike vs gas blowout vs sustained low prices).
+*Shows:* *what* the bad outcomes are made of.
+*Desk action:* lets the desk hedge the dominant tail driver specifically rather than buying blanket protection.
+
+**5.3 Co-spike correlation stress.**
+*Type:* margin (mean + tail) as a function of the power–gas correlation/co-spike assumption.
+*Shows:* sensitivity to the joint-modelling assumption that is hardest to calibrate and most consequential.
+*Desk action:* a confidence band on the valuation reflecting correlation uncertainty — and a flag if the trade only works under benign correlation.
+
+---
+
+## TIER 6 — Calibration & model credibility (why believe it)
+
+Without this tier, a sophisticated desk discounts everything above. These charts **explain and defend the methodology.**
+
+**6.1 Reprice check — model vs traded.**
+*Type:* per quarter/region: model cap-strip fair value vs **ASX cap forward**, and model swap-implied vs **ASX swap forward**, with the residual.
+*Shows:* the model reprices the instruments it's calibrated to (no-arbitrage sanity).
+*Desk action:* **the trust gate.** If residuals are non-trivial, the tail is mis-calibrated and no margin number is reliable — fix before trading.
+
+**6.2 Simulated vs historical exceedance curve.**
+*Type:* log-scale `P(S > x)` for simulated vs historical prices, **focused on the tail above $300**, truncated at the MPC.
+*Shows:* the spike distribution — frequency and magnitude — matches reality where it matters for caps.
+*Desk action:* confirms the engine that drives cap payouts is calibrated to observed tail behaviour, not just the mean.
+
+**6.3 Backtest — realised vs predicted.**
+*Type:* over recent history: realised capture price, realised margin, and realised cap-defence outcomes vs model predictions for the same period.
+*Shows:* out-of-sample performance.
+*Desk action:* the empirical credibility of the whole approach; persistent bias here is a red flag.
+
+**6.4 Monte Carlo convergence / standard error.**
+*Type:* margin estimate ± MC standard error vs number of paths.
+*Shows:* the headline number is stable, not simulation noise.
+*Desk action:* tells the desk the precision of the valuation — and whether two units' margins are *distinguishably* different or within noise.
+
+---
+
+## TIER 7 — Term structure & seasonality (across quarters and regions)
+
+**7.1 Margin term structure.**
+*Type:* line/bar of fair value and expected margin by quarter out to the traded horizon (Q3-26, Q4-26, Q1-27, …).
+*Shows:* the forward curve of value — caps trade by quarter, so this is the tradeable shape.
+*Desk action:* which quarters to sell into; where the value (and liquidity) is.
+
+**7.2 Seasonality / value concentration.**
+*Type:* bar of value share by quarter, with summer-peak quarters highlighted for the relevant region.
+*Shows:* a peaker's value is concentrated in a few quarters.
+*Desk action:* don't spread `N` evenly across the year — concentrate cap sales where the asset actually defends and the premium is richest.
+
+**7.3 Region / cross-asset grid (if a portfolio).**
+*Type:* heatmap of margin (or edge vs screen) by quarter × region × unit.
+*Shows:* where across the book the opportunity and the concentration sit.
+*Desk action:* portfolio-level allocation of cap-selling capacity and identification of concentrated tail bets.
+
+---
+
+## 8. Making it actionable — from valuation to trade
+
+The charts above are inputs to five concrete desk decisions. State these explicitly, or the pack stays academic.
+
+1. **What to sell, and how much.** Recommended `N` per quarter/region = a haircut to nameplate driven by the **spike capture rate (3.2)** and **CVaR limit (1.1)** — not nameplate. Over-selling caps manufactures the uncovered tail.
+2. **At what level (the edge).** Trade where **fair value > screen (1.2)**; the breakeven premium (1.3) is the floor. The edge persists only while the residual in the reprice check (6.1) is clean.
+3. **How to hedge the residual.** After the natural cap-short, hedge to the **cap-equivalent + swap-equivalent deltas (4.3)** and run the **delta hedge off the curves (4.2)**, rebalancing as forwards move (the gamma is the rebalancing cost).
+4. **When to rebalance / re-mark.** Define triggers: power forward moves ±$X, gas ±$Y/GJ, MLF reset, or a cap reprice residual breach. The **tornado (4.1)** tells you which moves matter enough to act on.
+5. **Limits and capital.** Frame position limits in **CVaR (5.1/5.2)** terms, account for **margin/collateral** on short caps against expected carry (capital efficiency), and check **concentration** against the rest of the book (7.3) — a peaker's cap-short correlates with every other short-cap position the desk holds.
+
+**Practical constraints to surface alongside the trade:** cap-market **liquidity by quarter** (how much `N` you can actually execute), **regional basis** if the unit sits away from the liquid reference, and **collateral usage** — a beautiful expected return that ties up disproportionate margin may lose to a thinner trade elsewhere.
+
+---
+
+## 9. The minimal viable dashboard
+
+If you build nothing else, build these six. Together they let a desk understand the methodology *and* trade it:
+
+1. **Quarterly margin distribution** (1.1) — the risk picture; the reason for the cap frame.
+2. **Value attribution waterfall** (2.1) — where the number comes from.
+3. **Capture vs baseload vs strike** (2.3) — why caps, not swaps.
+4. **Fair value vs ASX screen by quarter** (1.2) — the trade signal / edge.
+5. **Spike capture rate + starts** (3.2 / 3.4) — the realism gate; the uncovered tail.
+6. **Tornado sensitivity + cap/swap-equivalent deltas** (4.1 / 4.3) — the hedge.
+
+Everything in Tiers 5–7 is the depth you reach for when a number looks wrong or a position gets large. Tiers 1–4 are the daily desk view.
+
+---
+
+## 10. Design principles for the pack
+
+- **Decision first, diagnostics on drill-down.** Never make a trader scroll past calibration plots to find the trade.
+- **Label the measure** (risk-neutral vs physical) on every chart. The two headline numbers are not interchangeable.
+- **Distribution over point estimate**, everywhere the cap framing's value is the risk profile.
+- **Tie every chart to an action.** A chart that drives no decision is noise — cut it.
+- **Reprice or it didn't happen.** A valuation that can't reproduce the traded cap and swap has no standing to claim edge against them.
