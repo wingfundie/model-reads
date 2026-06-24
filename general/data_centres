@@ -1,0 +1,236 @@
+Australia's data centre market is currently undergoing a massive expansion, driven largely by the surge in AI compute requirements and cloud adoption. The national capacity is projected to more than double over the next few years.
+Here is the current outlook on Australia's data centre pipeline from mid-2026 through the end of the decade.
+## The Macro Pipeline: Load and Scale
+As of early 2026, Australia has an installed capacity of roughly **1.35 GW to 1.8 GW**.
+ * **Projected Growth:** Total deployable capacity is expected to reach **3.1 GW to 3.2 GW by 2030**.
+ * **The Pipeline:** There are currently between 90 and 175 prospective facilities in various stages of planning and development across the country.
+ * **Investment:** Fulfilling this capacity will require an estimated **$26 billion to over $70 billion** in infrastructure investment.
+## Major Planned Facilities (2026–2030)
+While smaller 10–20 MW colocation builds continue, the market is heavily skewing toward massive "hyperscale" campuses built to absorb 50 MW to 100+ MW loads.
+
+| Project / Operator | Location | Estimated IT Load | Target Online Date |
+| :--- | :--- | :--- | :--- |
+| **Mamre Road Data Centre (ISPT)** | Sydney, NSW | 1,000 MW – 1,200 MW | Proposed (Site acquired 2024) |
+| **CDC Marsden Park** | Sydney, NSW | 504 MW | Under construction |
+| **CDC Laverton** | Melbourne, VIC | 150 MW | Expected 2027 |
+| **NEXTDC M3 Stage 2** | West Footscray, VIC | 150 MW | Expansion pipeline |
+| **GreenSquareDC SYD1** | Norwest, NSW | 110 MW | Q3 2026 (15 MW Phase 1) |
+| **Macquarie IC3 Super West** | Sydney, NSW | 47 MW | Short-term pipeline |
+| **BNE4 (DigiCo REIT)** | Brisbane, QLD | 19.6 MW | Expected 2027 |
+| **Microsoft Cloud Regions** | National Expansion | 150 MW (across regions) | Expected 2027 |
+
+> **A note on location:** Over 80% of this pipeline is concentrated in New South Wales (Sydney) and Victoria (Melbourne). However, severe grid congestion in Sydney's west and Melbourne's north is delaying connection approvals, which may push future mid-sized builds (10–20 MW) toward Brisbane, Perth, and Adelaide.
+> 
+## The Energy Challenge
+Data centres are becoming a structurally significant load on Australia's National Electricity Market (NEM).
+ * **Current Load:** In 2025, data centres consumed roughly **4 TWh** (about 2% of the NEM).
+ * **2030 Forecast:** The Australian Energy Market Operator (AEMO) projects this to triple to **12 TWh** by 2030 under their "Step Change" scenario, representing roughly 6% of the entire grid's electricity.
+ * **Long-term:** By 2050, data centre demand could reach **34.5 TWh**, or 12% of the NEM.
+Because data centres require uninterrupted power, operators are increasingly funding their own transmission upgrades, substations, and firming capacity to secure grid connections.
+## Sources for this Data
+The projections and figures above are aggregated from several prominent 2025/2026 market intelligence reports:
+ 1. **AEMO & Oxford Economics:** *Data Centre Energy Demand Report (2025/2026)* — for grid load forecasts and energy step-change scenarios.
+ 2. **Mandala Partners:** *Empowering Australia’s Digital Future (Oct 2024)* — for macroeconomic pipeline and capacity modeling.
+ 3. **DC Byte & Data Centres Australia:** *Australian Data Centre Forecast Report* — for pipeline volume (number of facilities) and operational vs. planned splits.
+ 4. **M3 Property & Mordor Intelligence:** *Data Centre Construction Market Reports* — for specific project loads, capital expenditure, and regional bottlenecks.
+ 5. **Climate Council:** *Seizing the opportunity to do data centres right (2026)* — for environmental impact, water usage, and the Mamre Road mega-project details.
+
+Whats the planned data centre buildout in australia from today, with estimates of load, location, time ehen they comr online, and sources for this data
+
+Here's the full pipeline report. Given your NEM forecasting work, the demand-side implications are the most directly actionable section — a few standouts worth noting:
+
+**Scale of the load shock**: AEMO's accelerated transition scenario now projects data centres reaching ~4,000 MW of continuous NEM draw by 2036, up from ~400 MW today[1][2]. That's a 10x increase in ~10 years, and AEMO already flagged that Q1 2026 data centres accounted for 50% of underlying NEM demand growth[3]. Your spike and baseline quantile models will need to be re-calibrated regularly given how fast the committed pipeline (3.1 GW) converts to load.
+
+**Sydney NSW concentration**: Of the 21.6 GW headline pipeline, 11.4 GW is in Sydney alone[4]. The committed + under-construction tier is overwhelmingly western Sydney (Eastern Creek, Kemps Creek, Marsden Park corridor) — all connecting to the same Transgrid 330 kV network zone, which creates locational marginal price (LMP) sensitivity that could directly influence NSW regional reference prices.
+
+**Source hierarchy for tracking**:
+- **RenewMap** is the best live DA tracker by state (NSW, VIC, WA) with MW and approval status[5][6][7]
+- **DCA × DC Byte report** (bi-annual) is the consensus baseline for capacity phases[4]
+- **AEMO ESOO + quarterly reports** are your primary source for grid demand translation — AEMO now models data centres as a distinct category with ramp-up curves[8][9]
+- **ASX filings from NEXTDC (NXT) and Macquarie Technology (MAQ)** give quarterly under-construction MW and forward order books[10][11]
+
+| NEXTDC P3 | NEXTDC | Perth | TBD | Planning | TBC[^25] |
+| Project Meridien | Gingerah Energy | Perth | 100 MW | Development (not yet submitted) | TBC[^41] |
+| GreenSquareDC WAi1 | GreenSquareDC | WA | 120 MW | Withdrawn[^41] | â€” |
+
+SUBCO's SMAP hypercable (Perthâ€“Adelaideâ€“Melbourne) began services March 2026 and connects NEXTDC P2 and Equinix PE2 in Perth[^42], improving the commercial viability of Perth as a data centre market.
+
+***
+
+### South Australia & Northern Territory
+
+- **NEXTDC A1 Adelaide**: Operational (2024)[^37]
+- **NEXTDC D1 Darwin**: Operational (2024), targeting remote/defence workloads[^37]
+- Equinix AE1 Adelaide is a carrier-neutral hub serving as a connectivity node[^42]
+
+***
+
+## Hyperscaler Investment Commitments
+
+| Hyperscaler | Committed Investment | Focus | Timeline |
+|-------------|---------------------|-------|----------|
+| AWS | AU$20 billion | Sydney + Melbourne expansion | 2025â€“2029[^26][^27] |
+| Microsoft Azure | AU$25 billion | 140%+ capacity expansion (29 centres) | By end 2029[^26][^19] |
+| Google | ~AU$20 billion (reported, under review) | APAC infrastructure | Under consideration[^19] |
+| OpenAI (via NEXTDC S7) | AUD 7 billion campus anchor | GPU supercluster, Eastern Creek | Phase 1 H2 2027[^12][^43] |
+| AirTrunk (Blackstone) | AU$5 billion (MEL2 alone) | Melbourne North-West campus | H2 2027 Phase 1[^29][^15] |
+| Goodman Group | AU$4â€“18 billion global WIP | Australian/global pipeline | FY26 onward[^44][^21] |
+| CDC Data Centres | AU$1.4 billion (Marsden Park alone) | Sydney / Melbourne / Canberra | 2028â€“2029[^45][^10] |
+
+***
+
+## NEM Grid Load Implications
+
+AEMO first broke out data centres as a distinct demand category in August 2025, reflecting their materiality to grid planning[^6][^46]. Key forecasts:
+
+- **Current load (FY2025)**: ~4 TWh consumed (~2.2% of NEM demand, ~340â€“400 MW continuous)[^5][^47]
+- **Step Change scenario (AEMO 2025 ESOO)**: 12 TWh by 2029â€“30 (~6% of NEM), growing ~25% YoY[^6][^48]
+- **Accelerated transition (AEMO 2026)**: 35 TWh by 2036 (~4,000 MW equivalent load, ~12.5% of NEM)[^4][^48]
+- **AEMO Q1 2026 quarterly report**: Data centres = 50% of underlying NEM demand growth; 5.4 GW of new capacity in the connection pipeline[^7]
+
+AEMO's methodology now distinguishes commercial (<10 MW) from industrial (>10 MW) scale data centres, applying project-level ramp-up periods, load realisation factors, and load factors to translate rated capacity into expected grid draw[^6]. The IEEFA submission to the draft 2026 ISP noted AEMO's forecasts may still undercount actual uptake given the pace of announcements[^48].
+
+The grid implications are asymmetric by state:
+- **NSW**: Western Sydney corridor faces substation and transmission congestion risk. The NSW IDA has fast-tracked 15 data centre projects worth ~AU$51.9 billion to expedite approvals and grid connections[^1][^49]
+- **Victoria**: Melbourne's western corridor (Laverton, Truganina) is similarly constrained; the Victorian AI Hub (2.4 GW) would require on-site gas turbine generation to buffer AI training load swings[^39]
+- **WA**: Perth benefits from SMAP cable but the SWIS (South West Interconnected System) is separate from the NEM â€” data centres in Perth do not contribute to NEM load figures
+
+***
+
+## Key Data Sources
+
+For tracking this pipeline, the following sources are most authoritative:
+
+| Source | Coverage | Notes |
+|--------|----------|-------|
+| **DCA Ã— DC Byte Australian Data Centre Forecast Report** | National; operational + pipeline by phase | First shared industry baseline, published April 2026; bi-annual updates[^1] |
+| **AEMO Electricity Statement of Opportunities (ESOO)** | NEM demand, data centre as distinct category from 2025 onward | Best for grid load forecasting; 2026 ISP draft out[^6][^46] |
+| **RenewMap Australia** | State-by-state project tracker: NSW, VIC, WA, QLD with MW, status, DA status | Excellent for monitoring DA activity and construction status[^8][^41][^28] |
+| **NSW Planning Portal (Major Projects)** | NSW SSD/SSD applications, DA documents for individual sites | Primary source for Marsden Park, S7, Mamre Road, etc.[^50][^51] |
+| **Victorian Planning Register** | VIC DA filings | Tracks Melbourne projects like Stockland Brooklyn[^20] |
+| **DC Pulse / Data Center Dynamics / W.Media** | Project-level announcements, construction milestones | Good for recent operator announcements[^29][^32] |
+| **ASX filings (NEXTDC, Macquarie Technology)** | Capacity under construction, capex, forward order book | Quarterly updates with MW under construction, billings pipeline[^25][^33] |
+| **Operator websites (NEXTDC, CDC, AirTrunk, Goodman)** | Site-level capacity, status | AirTrunk reports 755+ MW operational in Australia across SYD and MEL[^52] |
+| **M3 Property / Cushman & Wakefield APAC Reports** | Broader APAC pipeline context | C&W tracks 19,371 MW APAC pipeline (3,677 MW under construction)[^53] |
+
+***
+
+## Key Caveats and Uncertainty
+
+1. **Pipeline inflation**: 16.8 GW of 21.6 GW total pipeline is "early stage" â€” these are land options, concept proposals, or projects without secured power[^1][^2]. The DCA Ã— DC Byte forecast expects only ~1.8 GW to be operational by 2030 from that cohort[^7]
+2. **Power constraints**: Grid connection queues in NSW and VIC are the primary gating factor. Projects without secured network access points should be treated as speculative[^54]
+3. **Load realisation factors**: Data centres rarely draw their rated IT load capacity continuously. AEMO applies realisation discounts when translating nameplate capacity to grid demand[^6]
+4. **Naming overlap**: Multiple projects in the same precinct (e.g., Eastern Creek) are reported under different names by different tracking sources â€” cross-referencing planning portal coordinates is recommended for deduplication
+5. **CDC 555 MW deal counterparty**: The US tech company is undisclosed, complicating independent verification of timeline and scope[^10]
+
+---
+
+## References
+
+1. [1.4 GW Today, 3.2 GW by 2030: Inside the DCA Ã— DC Byte Forecast ...](https://certifiedstrategic.com/insights/australia-data-centre-forecast-2026-dca-dc-byte) - The new DCA Ã— DC Byte forecast gives Australia its first shared data centre capacity baseline. 1.4 G...
+
+2. [Five themes from a remarkable quarter for Australian data centre ...](https://certifiedstrategic.com/insights/australia-data-centre-ai-infrastructure-2026-five-themes) - Inside 90 days: Microsoft A$25 billion, AWS 430MW of new renewables, NEXTDC's A$2.2 billion capital ...
+
+3. [Six predictions for Australian data centre and AI infrastructure ...](https://certifiedstrategic.com/insights/australia-data-centre-ai-infrastructure-2026-six-predictions) - Six predictions for the next quarter of Australian data centre and AI infrastructure: Sharon AI and ...
+
+4. [[PDF] For personal use only - investorpa](https://investorpa.com/announcement-pdf/20260525/296237.pdf)
+
+5. [AEMOs updated forecasting methodology targets rapidly growing electricity loads](https://aemo.com.au/newsroom/news-updates/aemos-updated-forecasting-methodology-targets-rapidly-growing-electricity-loads)
+
+6. [AEMO puts data centres under the forecasting microscope - W.Media](https://w.media/aemo-puts-data-centres-under-the-forecasting-microscope/) - The operator estimates that data centres consumed around 4 TWh in FY 2025, roughly 2.2 percent of to...
+
+7. [Australia's data centre growth proportion now matches the US](https://ketanjoshi.co/2026/04/30/australias-data-centre-growth-proportion-now-matches-the-us/) - The Australian Energy Market Operator (AEMO) 's quarterly grid report shows that a full 50% of deman...
+
+8. [NSW Data Centre Projects: Sydney & Beyond](https://renewmap.com.au/resources/projects/nsw/datacentre/) - Track NSW data centre projects on RenewMap, including Western Sydney hyperscale campuses, grid capac...
+
+9. [Goodman Group Commits $4 Billion to Data Centres](https://commercialpropertymarketing.com.au/goodman-group-commits-4-billion-to-data-centres/) - Goodman Group Commits $4 Billion to Data Centres news - Commercial Property Marketing Sydney - 3D Re...
+
+10. [CDC signs 'largest ever' Aussie data center deal to provide ...](https://www.datacenterdynamics.com/en/news/cdc-signs-largest-ever-aussie-data-center-deal-to-provide-555mw-for-us-client/) - Takes contracted capacity above 1GW
+
+11. [CDC Data Centres Breaks Ground on New State-of-the-Art Data ...](https://cdc.com/resources/news/cdc-data-centres-breaks-ground-on-new-state-of-the-art-data-centre-development-in-marsden-park-industrial-precinct/) - The Marsden Park facility will be the biggest data centre campus in the Southern Hemisphere, featuri...
+
+12. [OpenAI and NextDC unveil AUD 7bn plan for sovereign AI campus ...](https://w.media/openai-and-nextdc-unveil-aud-7bn-plan-for-sovereign-ai-campus-in-sydney/) - Subject to approvals, the first stage is expected to be delivered in the second half of 2027.
+
+13. [NEXTDC Plans $7bn AI Campus at Western Sydney Site](https://www.theurbandeveloper.com/articles/eastern-creek-data-centre-550mw-openai-nextdc) - Subject to approval, the first phase of the S7 project is expected to be delivered in the second hal...
+
+14. [NEXTDC to build AI campus and GPU "supercluster" in ...](https://www.itnews.com.au/news/nextdc-to-build-ai-campus-and-gpu-supercluster-in-sydney-622380) - In partnership with OpenAI.
+
+15. [AirTrunk to add 345 MW facility in AUD 5bn Melbourne investment](https://w.media/airtrunk-to-add-345-mw-facility-in-aud-5bn-melbourne-investment/) - AirTrunk announced plans to add more than AUD 5 billion. Melbourne to over 630 MW. be known as MEL2,...
+
+16. [Mamre Road Data Centre Campus](https://majorprojects.planningportal.nsw.gov.au/prweb/PRRestService/mp/01/getContent?AttachRef=SSD-92743706%2120250930T225822.532+GMT)
+
+17. [ISPT site to host 1GW data centre in Western Sydney - W.Media](https://w.media/ispt-site-to-host-1gw-data-centre-in-western-sydney/)
+
+18. [Construction of new leading data centre underway in the Hunter](https://hunterheadline.com.au/article/construction-of-new-leading-data-centre-underway-in-the-hunter/) - Construction of the Leading Edge Data Centre facility in Mayfield West began earlier this week. The ...
+
+19. [Microsoft pledges $18bn to expand cloud and AI capacity in Australia](https://www.datacenterdynamics.com/en/news/microsoft-pledges-18bn-to-expanding-cloud-and-ai-capacity-in-australia/) - Will be invested by end of 2029
+
+20. [Stockland files to develop another data center in Melbourne, Australia](https://www.datacenterdynamics.com/en/news/stockland-files-to-develop-another-data-center-in-melbourne-australia/) - Stockland has filed for a planning permit to develop a two-story data center totaling 250MW at 412 F...
+
+21. [Goodman breaks ground on 90MW Sydney DC as pipeline reaches ...](https://w.media/goodman-breaks-ground-on-90mw-sydney-dc-pipeline-reaches-aud-18bn/) - Goodman Group has formally marked the start of construction on a 90MW data centre in northern Sydney...
+
+22. [Goodman files to develop 90MW data center campus in Sydney ...](https://bebeez.eu/2025/04/08/goodman-files-to-develop-90mw-data-center-campus-in-sydney-australia/)
+
+23. [Goodman files plans for 500 MW Sydney campus as expansion ...](https://w.media/goodman-files-plans-for-500-mw-sydney-campus-as-expansion-continues/)
+
+24. [Macquarie Data Centres tops out 47 MW IC3 Super West - W.Media](https://w.media/macquarie-data-centres-tops-out-47-mw-ic3-super-west/)
+
+25. [NextDC outlines strategy for AIâ€‘era expansion across ...](https://w.media/nextdc-outlines-strategy-for-ai-era-expansion-across-australia-and-asia/) - NextDC CEO Craig Scroggie has outlined the companyâ€™s strategy to build on a year of rapid growth and...
+
+26. [2026 Cloud Covered Report - iTnews](https://www.itnews.com.au/special-feature/2026-cloud-covered-report-626279) - How Aussie tech leaders turn cloud into AI advantage.
+
+27. [Australia Data Centre Boom 2026: 7 Procurement Opportunities](https://www.winningadventure.com.au/article/australia-data-centre-supply-chain) - Australia's data centre boom opens procurement opportunities. Server racks, cooling, UPS, cabling â€” ...
+
+28. [Victorian Data Centre Projects: Melbourne | RenewMap](https://renewmap.com.au/resources/projects/vic/datacentre/) - Track Victorian data centre projects on RenewMap â€” Melbourne hyperscale expansion, grid connection c...
+
+29. [AirTrunk MEL2 - Melbourne North-West - DCPulse](https://dcpulse.com/project/airtrunk-mel2-melbourne-hyperscale-data-center) - AirTrunk MEL2 - Melbourne North-West
+
+30. [AirTrunk unveils second Melbourne campus, operational from 2027](https://www.crn.com.au/news/2026/data-centre/airtrunk-new-melbourne-location-mel2) - With over 354MW capacity, MEL2 will reportedly add more than A$5 billion. AirTrunk's total deployabl...
+
+31. [MEL02 â€“ Melbourne](https://www.stackinfra.com/locations/asia-pacific/melbourne/mel02/) - Don't miss out on one of the fastest growing cities in Australia. Melbourne is on the fast track to ...
+
+32. [Stack tops out Swiss data center, completes construction in Melbourne](https://www.datacenterdynamics.com/en/news/stack-tops-out-swiss-data-center-completes-construction-in-melbourne/) - Work continues on ZUR2 and MEL01B
+
+33. [NEXTDC Limited Provides an Update in Relation to the Development Activity in half-year ended 31 December 2024](https://www.marketscreener.com/quote/stock/NEXTDC-LIMITED-9015368/news/NEXTDC-Limited-Provides-an-Update-in-Relation-to-the-Development-Activity-in-half-year-ended-31-Dece-49140272/) - NEXTDC Limited provided an update in relation to the development activity. Land acquired for new S7 ...
+
+34. [APAC - Vantage Data Centers](https://vantage-dc.com/data-center-locations/apac/) - Melbourne, Australia. Total 64MW. Explore MEL1. Fo Tan, Hong Kong. Total 13MW. Explore HKG2. Kwai Ch...
+
+35. [Melbourne, Australia Data Center Campus](https://vantage-dc.com/data-center-locations/apac/melbourne-australia/) - Conveniently located in Tullamarine just six kilometers from Melbourne Airport, our Melbourne campus...
+
+36. [Singaporean giant to recharge Vic energy heartland with ...](https://www.commercialrealestate.com.au/news/singaporean-giant-to-recharge-vic-energy-heartland-with-10b-ai-hub-1473606/) - Itâ€™s the latest in a series of high-profile, multibillion-dollar commitments in a race to meet the A...
+
+37. [NextDC - Wikipedia](https://en.wikipedia.org/wiki/NextDC)
+
+38. [Melbourne's next giant: A 350-hectare data centre mega-hub quietly ...](https://www.facebook.com/iand.hillery/posts/melbournes-next-giant-a-350-hectare-data-centre-mega-hub-quietly-planned-for-plu/2620657955031864/) - Melbourneâ€™s next giant: A 350-hectare data centre mega-hub quietly planned for Plumpton in the west,...
+
+39. [Exclusive: The largest data centre ever publicly proposed ... - LinkedIn](https://www.linkedin.com/posts/the-age_exclusive-the-largest-data-centre-ever-publicly-activity-7465995144803057665-4EGU) - Loy Yang A is scheduled to close in 2035. The Victorian AI Hub reaches full capacity the same year. ...
+
+40. [Mapping the Top Data Centres in Australia](https://www.reddit.com/r/AustralianDataCentres/comments/1rl2enm/mapping_the_top_data_centres_in_australia/) - Mapping the Top Data Centres in Australia
+
+41. [WA Data Centre Projects: Perth & Resources - Australia - RenewMap](https://renewmap.com.au/resources/projects/wa/datacentre/) - How many Data centre projects are there in Western Australia? As of June 2026, Western Australia has...
+
+42. [SUBCO boosts diverse fibre links between key cities - IT Brief Australia](https://itbrief.com.au/story/subco-boosts-diverse-fibre-links-between-key-cities) - SUBCO adds diverse Sydney-Melbourne fibre paths and wider data centre access, aiming to cut single p...
+
+43. [Australia Data Center Market Projected to Reach USD 8.2 Billion](https://www.openpr.com/news/4485676/australia-data-center-market-projected-to-reach-usd-8-2-billion) - Australia Data Center Market Overview Australia is becoming a digital powerhouse with global tech gi...
+
+44. [Goodman tilts pipeline towards data centres as power bank ...](https://w.media/goodman-tilts-pipeline-towards-data-centres-as-power-bank-reaches-6gw/) - Australian-based global real estate company Goodman Group has sharpened its focus on digital infrast...
+
+45. [CDC breaks ground on 504MW campus in Sydney](https://www.datacenterdynamics.com/en/news/cdc-breaks-ground-on-504mw-campus-in-sydney/) - First filed with Blacktown City Council in May this year
+
+46. [AEMO updates Electricity Demand Forecasting Methodology](https://www.linkedin.com/posts/australian-energy-market-operator_aemo-has-released-an-updated-electricity-activity-7358653620600360960-K4mk) - AEMO has released an updated Electricity Demand Forecasting Methodology, evolving to reflect the rap...
+
+47. [[PDF] response to the australian energy market - AEMC](https://www.aemc.gov.au/sites/default/files/2025-07/27.%20TM%20Advisory%20(late).pdf)
+
+48. [[PDF] Australian Energy Market Operator Re: Draft 2026 ISP Consultation ...](https://www.aemo.com.au/-/media/files/major-publications/isp/draft-2026/consultation-submissions/ieefa.pdf?rev=d1d9e589dc524398933175a0c2ff605c&sc_lang=en) - AEMO's latest forecasts show a significant increase in projected data centre load ... â€œAEMO's data c...
+
+49. [Australia's Evolving Data Centre Landscape: Policy meets Pipeline](https://www.ashurst.com/en/insights/australia-evolving-data-centre-landscape-policy-meets-pipeline/) - IDA has endorsed $51.9 billion worth of projects so far, including with 15 data centre projects that...
+
+50. [[PDF] State Significant Development SSD-70889211 - Major Projects](https://majorprojects.planningportal.nsw.gov.au/prweb/PRRestService/mp/01/getContent?AttachRef=SSD-70889211%2120251112T010754.738+GMT)
+
+51. [Marsden Park Data Centre - Department of Planning and Environment](https://www.planningportal.nsw.gov.au/major-projects/projects/marsden-park-data-centre) - Construction and operation of a data centre with a power consumption of 504 megawatts (MW), comprisi...
+
+52. [Australia | Locations - AirTrunk](https://airtrunk.com/location/australia/) - We operate Australia's largest hyperscale data centre campuses across Sydney and Melbourne, offering...
+
+53. [INSIDE AUSTRALIA'S $7 BILLION DATA CENTRE MARKET](https://www.linkedin.com/pulse/inside-australias-7-billion-data-centre-market-sai-naicker-y2kpc) - A Deep Dive for Real Estate Professionals and Institutional Investors In the past 18 months, Austral...
+
+54. [Data centres: When to include them in electricity demand ...](https://www.ausnetservices.com.au/about-us/our-insights/data-centres-when-to-include-them-in-electricity-demand-forecasts) - By improving confidence in forecasts, the electricity sector can better plan for additional demand d...
