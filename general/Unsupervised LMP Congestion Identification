@@ -1,0 +1,339 @@
+# Unsupervised Congestion Status Identification Using LMP Data â€” A Comprehensive Report
+
+**Paper:** K. Zheng, Q. Chen, Y. Wang, C. Kang, L. Xie, "Unsupervised Congestion Status Identification Using LMP Data," *IEEE Transactions on Smart Grid*, vol. 12, no. 1, pp. 726â€“736, Jan. 2021. DOI 10.1109/TSG.2020.3011266. arXiv:2411.10058.
+
+---
+
+## 0. Orientation: what the paper actually claims
+
+The paper makes one structural observation and builds an algorithm around it.
+
+**The observation.** The congestion component of a nodal LMP vector is, by the KKT conditions of the market clearing problem, a linear combination of specific rows of the PTDF matrix â€” precisely the rows belonging to the transmission lines that are binding at that instant. Because only a handful of lines bind during any short market interval, the congestion-price vector is confined to a *low-dimensional linear subspace*, and the identity of the binding set is exactly the identity of that subspace. Over time, as generators' marginal offers fluctuate, the shadow prices on the binding lines wander, so the congestion vector moves *within* its subspace but never leaves it. A time series of congestion prices is therefore a cloud of points sampled from a **union of subspaces**, one subspace per congestion pattern (per "system pattern region," SPR).
+
+**The task.** Recover the congestion status at every interval â€” i.e., cluster the points into their subspaces and recover the spanning (basis) vectors â€” using *only the public LMP data*, with no access to topology, line parameters, PTDF, or nodal loads. A useful by-product: the recovered basis vectors are (up to sign and scale) the PTDF rows of the binding lines, so you reconstruct part of the PTDF matrix.
+
+**Why it's hard.** The subspaces *overlap and nest*: if line A alone spans a 1-D subspace and line B alone spans another, then A-and-B-together span the 2-D subspace that *contains both*. Off-the-shelf subspace clustering (GPCA, sparse subspace clustering) assumes independent or disjoint subspaces and breaks on this nesting, and there are outliers. The contribution is a bespoke hierarchical search â€” bottom-up peeling plus top-down hyperplane detection â€” that handles nested subspaces with outliers.
+
+The rest of this report walks every section, develops the mathematics, then adds a critical assessment and the connection to regional-market (NEM-style) settings.
+
+---
+
+## 1. Notation primer
+
+| Symbol | Meaning |
+|---|---|
+| $n_b, n_l$ | number of buses, lines |
+| $P_G, P_D$ | generation / demand injection vectors |
+| $T$ | PTDF matrix ($n_l \times n_b$); $T_j$ is a *column* of $T^\top$ = row $j$ of $T$ |
+| $f^{\max}$ | line thermal limits |
+| $\lambda$ | shadow price of system power balance (energy price) |
+| $\mu = \mu^- - \mu^+$ | net shadow prices of the line-flow constraints |
+| $\gamma$ | shadow prices of generation limits |
+| $\sigma$ | shadow price of the linearized loss constraint |
+| $l, l_0, LF, d$ | total loss, loss intercept, loss factors, loss distribution vector |
+| $\pi, \pi^{\mathcal E}, \pi^{\mathcal C}, \pi^{\mathcal L}$ | LMP and its energy / congestion / loss components |
+| $M$ | number of time intervals; $k$ | number of ever-congested lines |
+| $X$ | congestion-LMP data matrix, $n_b \times M$ |
+| $\chi_t$ | vector of $\mu$ on the $k$ ever-congested lines at time $t$ |
+| $\mathfrak X_t$ | Boolean congestion status $= \mathbb 1(\chi_t \neq 0)$ |
+| $b, B$ | basis vector / basis matrix; $n$ = hyperplane normal |
+| $A$ | affinity (cosine-similarity) matrix; $\gamma_i, \xi_i$ = eigenvalue, eigengap |
+
+---
+
+## 2. Section I â€” Introduction
+
+**The setting and the information asymmetry.** LMPs are the settlement foundation of modern markets; they are the marginal cost of serving load at each node, computed by the ISO/RTO from submitted offers by solving a security-constrained economic dispatch (SCED), typically a linear or convex program. The SCED embeds the network â€” topology, thermal limits, impedances â€” and that network structure is what shapes the distribution of LMPs. But the network detail is generally confidential for security reasons, so market participants see the *prices* but not the *structure* that generated them. The research program the paper joins is: infer hidden structure from the public price data.
+
+**Prior work, in three buckets.** The authors situate their contribution against earlier data-driven LMP studies:
+
+1. *Learning the LMPâ€“load coupling.* Geng & Xie fit LMP as a function of nodal loads with a multi-class SVM, treating the load space as partitioned into regions on which the LMP map is affine. This is the SPR/CR idea in supervised form â€” but it needs the load data.
+2. *Recovering topology.* Kekatos et al. exploited the low-rank structure of LMP data plus the sparsity of the network adjacency matrix to set up a convex program that recovers/tracks line connectivity given enough price observations.
+3. *Inverse optimization.* Birge et al. used linear regression on released LMPs and the *inequality-constraint Lagrange multipliers* to recover market structure. The limitation the authors flag: several markets do not publish the exact multiplier values.
+
+**The theoretical anchor â€” SPRs / critical regions.** The paper leans on a known result: with network parameters and generation offers fixed, the congestion component of LMP is piecewise-constant in nodal load â€” loads within one *system pattern region* yield the same binding set and the same congestion vector. Geng & Xie proved this via multiparametric linear programming (the SPR = the "critical region" of the MLP), and Mather et al. gave a more rigorous treatment covering both linear and quadratic cost cases. This is what guarantees the subspace structure exists.
+
+**The gap the paper fills.** Existing SPR work assumes *static* generation offers. In reality the marginal offer fluctuates, so the congestion vector is not a discrete point per pattern but moves continuously *within* its subspace (Cheverez-Gonzalez & DeMarco). The discrete SPR label is thereby smeared into a continuous cloud, and you can no longer read off the congestion status by simple lookup. The paper's job is to un-smear it â€” cluster the continuous cloud back into its subspaces â€” *without any exogenous data* (no loads, no topology), which is the regime participants actually face.
+
+**Why anyone would want this.** Once you know the SPR / binding set: the LMP distribution collapses to known subspaces (useful for forecasting and for reconciling forecasts); you learn the borderline conditions on parameters, loads, and offers; and congestion status feeds directly into storage arbitrage, FTR valuation, virtual-bidding/manipulation models, and inverse-optimization estimates of rivals' costs â€” all of which the introduction cites as downstream consumers of congestion-scenario information.
+
+**The three stated contributions.**
+1. *Problem modeling* â€” cast congestion-status identification as recovering the basis vectors of the congestion-LMP subspaces in high-dimensional Euclidean space.
+2. *An efficient solution framework* â€” combine PCA, spectral clustering, and dual principal component pursuit in a bottom-up + top-down hierarchical search that peels the nested subspaces off one at a time.
+3. *Comprehensive experiments* â€” four cases (IEEE 30-, 118-, Illinois 200-bus, and real SPP data) demonstrating high accuracy and low runtime, with visualized intermediate steps.
+
+---
+
+## 3. Section II â€” Model and distribution of LMP
+
+This section derives *why* the subspace structure exists, first without losses, then with, then illustrates the geometry.
+
+### 3.1 Lossless DC-OPF and the LMP decomposition
+
+The clearing problem is
+$$
+\min_{P_G}\ \sum_{i\in\mathcal N} c_i(P_{Gi})
+\quad\text{s.t.}\quad
+\mathbf 1^\top P_G = \mathbf 1^\top P_D\ (\lambda),\quad
+|T(P_G-P_D)|\le f^{\max}\ (\mu^\pm),\quad
+P^{\min}\le P_G\le P^{\max}\ (\gamma).
+$$
+The LMP is the sensitivity of the optimal cost to demand, i.e., the derivative of the Lagrangian w.r.t. $P_D$:
+$$
+\boxed{\ \pi = \lambda\mathbf 1 + T^\top\mu,\qquad \mu = \mu^- - \mu^+\ }
+$$
+which splits cleanly into
+$$
+\pi^{\mathcal E} = \lambda\mathbf 1 \quad(\text{energy: identical at every node}),\qquad
+\pi^{\mathcal C} = T^\top\mu \quad(\text{congestion}).
+$$
+The decisive fact is complementary slackness: $\mu_j \neq 0$ **only for a binding line** $j$. Writing $T_j$ for the $j$-th column of $T^\top$ (= the $j$-th PTDF row),
+$$
+\pi^{\mathcal C} = \sum_{j\ \text{binding}} \mu_j\, T_j \ \in\ \mathrm{span}\{T_j : j\ \text{binding}\}.
+$$
+So the congestion vector lives in the span of the PTDF rows of the currently binding lines. The *binding set* is the *subspace*. As offers fluctuate, the $\mu_j$ change magnitude â€” the point slides around inside the span â€” but the span itself is fixed by which lines bind. That is the entire mechanism the paper exploits.
+
+### 3.2 Lossy DC-OPF (Litvinov et al. model)
+
+Real ISOs price losses. Adding a linearized loss balance and redistributing losses in the flow constraints:
+$$
+\mathbf 1^\top P_G = \mathbf 1^\top P_D + l\ (\lambda),\qquad
+l = l_0 + LF^\top(P_G-P_D)\ (\sigma),\qquad
+|T(P_G-P_D-l\,d)|\le f_{\max}\ (\mu^\pm).
+$$
+The LMP becomes
+$$
+\pi = \sigma\mathbf 1 - \sigma\,LF + T^\top\mu - \mathbf 1\!\cdot\!(d^\top T^\top\mu),
+$$
+now a three-way split:
+$$
+\pi^{\mathcal E} = \sigma\mathbf 1,\qquad
+\pi^{\mathcal C} = \underbrace{T^\top\mu}_{\pi_1} - \underbrace{\mathbf 1\,(d^\top T^\top\mu)}_{\pi_2},\qquad
+\pi^{\mathcal L} = -\sigma\,LF.
+$$
+
+**The loss wrinkle and its fix.** The nuisance is $\pi_2$: because the loss distribution vector $d$ is refreshed frequently, $\pi_2$ is *not* built from constant vectors, and it contaminates the clean subspace geometry of $\pi_1 = T^\top\mu$. The saving grace: $d^\top T^\top\mu$ is a **scalar**, so $\pi_2 = \mathbf 1\cdot(\text{scalar})$ adds the *same* value at every node. It is annihilated by subtracting the congestion price at any single reference node from all nodes. After that de-meaning, $\pi^{\mathcal C}$ collapses back to $\pi_1$ and the subspace structure is restored. This one-line preprocessing is what lets the method run on genuinely lossy markets (used on SPP in Case 4).
+
+### 3.3 Sparsity â†’ subspace, and the toy example
+
+ISOs publish all three LMP components. Empirically only a tiny fraction of lines bind in any short window â€” in CAISO, typically **two lines** are congested at a time. Hence $\pi^{\mathcal C}$ always sits in a subspace spanned by a *few* columns of $T^\top$ (lossless) or of $T^\top - \mathbf 1 d^\top T^\top$ (lossy).
+
+The 3-bus example makes it visible: bus 1 as reference, small Gaussian noise on the two generators' marginal costs, loads at buses 2 and 3 swept over $[-150, 300]$ MWh. Under the lossless model the congestion vectors fall onto exactly **two lines through the origin** â€” two congestion statuses, trivially separable by eye.
+
+### 3.4 The real difficulty â€” overlapping subspaces
+
+Beyond four nodes the geometry can't be drawn, but the schematic (their Fig. 3) captures the essential complication. Suppose subspaces $S_1, S_2, S_3$ each correspond to a single congested line, and $S_4$ to two lines congested together â€” the two lines of $S_1$ and $S_2$. Then $\pi^{\mathcal C}\in S_4$ whenever both of those lines bind, and crucially **$S_4$ entirely contains $S_1$ and $S_2$**. Standard subspace-clustering methods assume independent or disjoint subspaces; they can separate $S_3$ from $S_4$ but cannot resolve $S_4$ nesting $S_1$ and $S_2$. This containment â€” plus outliers â€” is exactly what forces a specialized algorithm, and it motivates the hierarchical (bottom-up-then-top-down) design in Section III.
+
+### 3.5 Robustness to modern SCED (forward reference)
+
+Multi-interval and look-ahead SCED add ramping and other inter-temporal constraints, which change the *values* of $\mu$ and $\sigma$. The authors note â€” and prove in the Appendix â€” that the *functional form* of the LMP decomposition is unchanged, so the subspace argument and the whole method survive these market designs. (Details in Â§8 below.)
+
+---
+
+## 4. Section III â€” Methodology
+
+### 4.1 (A) Problem formulation
+
+Stack the congestion vectors into a data matrix
+$$
+X = [\pi^{\mathcal C}_t]_{t\in\mathcal T},\qquad |\mathcal T| = M .
+$$
+Let $j_1,\dots,j_k$ ($k \ll n_l$) index the lines that ever congest over the window, and $T_1,\dots,T_{n_b}$ be the columns of $T^\top$. Then every column of $X$ is a combination of the same $k$ PTDF rows:
+$$
+X = [x_1,\dots,x_M] = [\,T_{j_1},\dots,T_{j_k}\,]\cdot[\chi_t]_{t\in\mathcal T},
+$$
+where $\chi_t\in\mathbb R^k$ holds the binding-line shadow prices $\mu$ at time $t$. The Boolean support
+$$
+\mathfrak X_t = \mathbb 1(\chi_t\neq 0)\approx \mathbb 1(|\chi_t|>\epsilon)
+$$
+**is** the congestion status: it says which of the $k$ candidate lines are binding at $t$. There are $2^k$ possible statuses in principle, but only a few materialize. In the 30-bus test, over 4 candidate lines (#10, 29, 30, 35) only **9** distinct statuses appear (their Table I), ranging from single-line patterns like $(0,0,1,0)$ up to the all-four $(1,1,1,1)$. Recovering $\mathfrak X_t$ from $X$ *without knowing $T$* is the whole game.
+
+### 4.2 (B) Basic framework
+
+Since all $M$ columns share the common spanning set $\{T_{j_1},\dots,T_{j_k}\}$, it suffices to find a common basis $B$. The pipeline: (i) PCA to drop the ambient dimension from $n_b$ to $k$ losslessly; (ii) a bottom-up search for the *explicit* basis vectors; (iii) if a "basis gap" blocks the bottom-up search, a top-down search to recover the *implicit* ones; (iv) once $B$ is in hand, encode $\mathfrak X_t = \mathbb 1(B^\dagger x_t\neq 0)$.
+
+### 4.3 (C) Principal component analysis
+
+$X$ has rank $k$ (tiny relative to $n_b$), so PCA compresses it to $k$ components with **no information loss** â€” purely to cut the cost of the downstream linear algebra. Complexity $O(n_b^2 M + n_b^3)$. (Notation is then abused to keep calling the reduced matrix $X$.)
+
+### 4.4 (D) Recursive basis search â€” bottom-up
+
+**Why start at dimension 1.** Finding arbitrary nested subspaces of mixed dimension in $\mathbb R^k$ is hard; finding *1-D* subspaces (rays through the origin) is easy, because two vectors lie on the same ray iff their cosine similarity is $\pm 1$:
+$$
+\cos\angle(v_1,v_2) = \frac{v_1^\top v_2}{\|v_1\|\,\|v_2\|} = 1 .
+$$
+
+**Building a clean affinity graph.** Normalize the columns and form the cosine-similarity affinity $A = |X^\top X|$. Then apply a hard **cutoff kernel**
+$$
+\kappa(x) = \begin{cases}1 & |x|>1-\varepsilon\\[2pt]0 & \text{otherwise}\end{cases}
+$$
+to get a sparse $A' = \kappa(A)$ that retains edges *only* between near-collinear vectors. Now "find 1-D subspaces" $\equiv$ "find connected clusters in $A'$."
+
+**Choosing the number of clusters automatically.** Apply spectral clustering with the **relative-eigengap** rule. Order the eigenvalues of $A'$ ascending, $\gamma_1\le\cdots\le\gamma_M$, and compute
+$$
+\xi_i = \frac{\gamma_{i+1}-\gamma_i}{\gamma_i},\qquad i\ge 2 .
+$$
+A large $\xi_i$ signals that $A'$ admits a good decomposition into at least $i$ clusters; run $k$-means with that many partitions on the leading eigenvectors, then read off the basis vector of each rank-1 cluster.
+
+**Peeling a dimension (the recursive step).** This is the heart of bottom-up. Suppose $v_1, v_2$ live in the 2-D subspace $\mathrm{span}(b_1,b_2)$ and $v_3$ elsewhere, and spectral clustering has already recovered $b_1$. **Orthogonalize** every point against $b_1$ â€” project onto $\mathrm{span}(b_1)^\perp$ â€” giving $\bar v_1, \bar v_2, \bar v_3$. After this projection, $\bar v_1$ and $\bar v_2$ are *collinear* (they now lie on a 1-D ray), so $b_2$ falls out of another spectral-clustering pass. Formerly-2-D subspaces have become 1-D. Repeat: each round strips one dimension off the whole cloud and exposes the next layer of basis vectors. Terminate when only one cluster remains ($K=1$).
+
+**Algorithm 1 (bottom-up), in words.** Repeat until $K=1$: normalize $X$; form $A=|X^\top X|$ and $A'=\kappa(A,\varepsilon)$; spectral-cluster into $X_1,\dots,X_K$; for each cluster, if $\mathrm{Rank}(X_i)=1$ add its basis to $\mathcal B$; project $X$ onto $\mathcal B^\perp$ (dimension reduction). Return $\mathcal B$. Complexity: affinity $O(k^2M)$, full SVD for spectral clustering $O(M^3)$, then $k$-means.
+
+**When bottom-up stalls â€” the basis gap.** Bottom-up needs a "ladder" that begins at dimension 1: at least one observed pattern with a *single* line binding, so that some points sit on a genuine ray. If **every** observed status has $\ge 2$ lines binding, no point ever lies in a 1-D subspace, spectral clustering finds no rank-1 cluster, and the peeling never starts. That failure mode is the **basis gap** (their Fig. 6). It is not a pathology â€” it is the norm in tightly meshed regions where lines only ever co-congest. The remedy is to attack from the top.
+
+### 4.5 (E) Hyperplane detection â€” top-down
+
+**The problem.** Instead of building up from rays, find a **hyperplane** $H_1$ (codimension 1, i.e., rank $k-1$) that contains as many points as possible. Equivalently, find its unit normal $n$ orthogonal to the largest cluster of points:
+$$
+\min_n\ \|X^\top n\|_0 \quad\text{s.t.}\quad \|n\|_2 = 1 .
+$$
+This is nonconvex on two counts (the $\ell_0$ count and the sphere constraint). Any solver lands in one of three regimes: (1) **global optimum** â€” $H_1$ holds the most points; (2) **non-trivial local optimum** â€” $H_1$ holds enough points to clear a threshold, which is *acceptable*; (3) **trivial** â€” too few points, rejected. The key relaxation of ambition: you do **not** need the global optimum, because any hyperplane containing a substantial point mass corresponds to a real congestion status.
+
+**Solving it with DPCP.** Use Dual Principal Component Pursuit. First relax $\ell_0 \to \ell_1$:
+$$
+\min_n\ \|X^\top n\|_1 \quad\text{s.t.}\quad \|n\|_2 = 1 ,
+$$
+whose constraint is still nonconvex, then solve a **sequence of linear programs** that linearize the sphere:
+$$
+n_{i+1} := \operatorname*{argmin}_{m^\top \hat n_i = 1}\ \|X^\top m\|_1,\qquad i\in\mathbb N,
+$$
+where $\hat{\ \cdot\ }$ denotes $\ell_2$-normalization and $n_0$ is initialized to minimize $\|X^\top n\|_2$ (the smallest right-singular vector). At convergence, inliers vs. outliers separate by their inner product with $n$; when the outlier fraction is small, the iterates reach the global optimum of the $\ell_1$ problem.
+
+**Why DPCP over alternatives.** EP-SpUD and ADM-based sparse-vector methods also target this problem, but none solves it perfectly for arbitrary $X$. DPCP is chosen because it holds up in the *challenging regime of large outlier ratios and high relative subspace dimension* â€” exactly the LMP regime, where the "inliers" of one hyperplane are a minority and everything else is an outlier. Concretely, with full-rank dimension $k$, $H_1$ of rank $k-1$, and inlier proportion $q$, DPCP provably tolerates on the order of
+$$
+O\!\left(\frac{q^2 M^2}{(k-1)\,k\,\log k^2}\right)\ \text{outliers}.
+$$
+
+**Random-sampling fallback.** When inliers are too sparse for DPCP to certify a result, switch to random sampling (RS): draw $k-1$ columns $x_{r_1},\dots,x_{r_{k-1}}$, build the normal $\tilde n$ of their span by Gaussian elimination, and accept it iff
+$$
+\Theta(X^\top\tilde n) > pM
+$$
+(the hyperplane contains at least a fraction $p$ of the points; $\Theta$ counts zeros, i.e., orthogonal points). Otherwise resample, up to $N$ draws. The probability of drawing $k-1$ inliers in one shot is
+$$
+\frac{\binom{qM}{k-1}}{\binom{M}{k-1}} \approx q^{k-1}\quad(k-1\ll qM),
+$$
+so failure after $N$ draws is $\approx (1-q^{k-1})^N$, which **decays exponentially in $N$**. Choosing $N$ to hold the failure probability below $\varepsilon$ gives RS cost $O(Nk^3)\approx O\!\big(-\log\varepsilon\cdot(1/p)^{k-1}k^3\big)$. Note the practical sting: the single-draw success $q^{k-1}$ collapses fast when the pattern is rare (small $q$) or the subspace is high-dimensional (large $k$).
+
+**Algorithm 2 (top-down), in words.** Try $\tilde n \leftarrow \mathrm{DPCP}(X)$; if condition (16) holds, return it; else loop up to $N$ times: $\tilde n \leftarrow \mathrm{RS}(X)$; return the first that satisfies (16). One call recovers one hyperplane; you then recurse into both the discovered hyperplane and its outlier set.
+
+**Why bottom-up goes first.** The top-down recursion is a tree â€” recurse into inliers and into outliers â€” with up to $2^k$ nodes in the worst case (their Fig. 10). Running bottom-up first shaves off whatever explicit basis vectors exist and reduces the working dimension, shrinking the tree and improving overall efficiency. The two searches are complementary: bottom-up is cheap and exact when a dimensional ladder exists; top-down is the general fallback that bridges basis gaps.
+
+### 4.6 (F) The assembled pipeline
+
+1. **Preprocess** â€” drop non-congestion columns; PCA to dimension $k$.
+2. **Bottom-up** â€” run Algorithm 1 to get basis set $\mathcal B$.
+3. **Project & prune** â€” project $X$ onto $\mathcal B^\perp$, delete all-zero columns, call the remainder $X^{(2)}$. *Usually $X^{(2)}$ is empty and you stop here.*
+4. **Top-down (if needed)** â€” if $X^{(2)}$ is non-empty, iterate Algorithm 2 to recover the remaining subspaces via their normals.
+5. **Decode** â€” assemble $B$ from the bottom-up bases and the top-down normals. If $\mathrm{Rank}(B)=\mathrm{Rank}(X)$, the basis is complete; recover the coefficients
+$$
+\hat\chi_t = B^\dagger X\quad(\text{Mooreâ€“Penrose pseudoinverse}),
+$$
+and threshold to get $\mathfrak X_t$.
+
+---
+
+## 5. Section IV â€” Numerical experiments
+
+**Common setup.** Intel Core i7-7500U @ 2.90 GHz, MATLAB R2016a; market cleared every 5 minutes; **576** congestion vectors collected per synthetic case. Accuracy is the **miscode rate**
+$$
+\textit{misrate} = 1 - \sum_{t\in\mathcal T}\frac{\Theta(\mathfrak X_t - \mathfrak C_t)}{k\times M},
+$$
+where $\mathfrak C_t = \mathbb 1(B^\dagger x_t)$ is the recovered code â€” i.e., the fraction of *line-status bits* recovered incorrectly, reportable per line or in total.
+
+### Case 1 â€” IEEE 30-bus (bottom-up demonstration)
+
+Six generators (buses 1, 2, 13, 22, 23, 27) with block offers as in Kekatos et al.; loads from a Kaggle 2008 dataset; 3% relative-std Gaussian noise on both offers and loads. There is **no basis gap**, so bottom-up suffices. After PCA, $X$ reduces to shape $(4, 576)$, exposing $k=4$ ever-congested lines. With $\varepsilon=0.005$, Round 1 finds 4 clusters, of which clusters 1 and 3 are rank-1 â†’ two bases $b_1, b_2$. Projecting onto $\mathcal B^\perp$ leaves $X^{(2)}$ with 30 points, so Round 2 runs and finds 2 more clusters â†’ $\mathrm{Rank}(B)=4$. Decoding gives a very low miscode rate (Table III: **0.39% total**; the individual lines are 0, 0, 1.22%, 0.35%). This case exists to visualize the peeling: cluster â†’ extract â†’ orthogonalize â†’ repeat.
+
+### Case 2 â€” IEEE 118-bus (top-down demonstration)
+
+Regional loads and participation factors from the NREL extended 118-bus case (Dec 2012); thermal limits imposed on **7 interregional lines**; offers set so Region 1 is the costliest of three; 3% Gaussian noise in the real-time market. The observed statuses (Table II) *always* have $\ge 2$ lines binding â€” e.g., $(1,0,1,1)$ at 51.9% and $(1,0,1,0)$ at 39.9% frequency across lines #(44, 45, 54, 128) â€” so bottom-up finds **no rank-1 cluster**: a textbook basis gap. Top-down then runs (their Fig. 10):
+
+- Round 1: DPCP succeeds, normal $\tilde n_1$; **529 of 576** points lie in that hyperplane, and the search continues within them; 47 points are outliers.
+- Round 2: DPCP fails on the 529; RS recovers $\tilde n_2$ with **230** orthogonal points. Separately, RS on the 47 Round-1 outliers yields $\tilde n_3$ with **19** orthogonal points.
+- Round 3: both DPCP and RS return negative â†’ the bottom of the subspace hierarchy is reached.
+
+The basis is then read off the tree: $b_1, b_2$ from the 230-point set, $b_3$ from the other 299 points (rank 3), $b_4$ from the 19-point set. **Total miscode rate 0.**
+
+### Case 3 â€” Illinois 200-bus (scale test)
+
+Loads randomized around the MATPOWER standard case; offers as two blocks of 65% capacity at 30 and 35 \$/MWh; **6 of 245 lines** ever congest. A basis gap exists again; top-down (DPCP + RS, iterated) runs **5 rounds** to recover 6 bases. **Total miscode rate 0** â€” the method scales to a 200-bus system without accuracy loss.
+
+### Case 4 â€” Southwest Power Pool (real market data)
+
+Real-time LMPs from **7,408 nodes** on **December 7, 2018**. Nodes that differ only in name and share identical LMPs throughout are merged, leaving **3,300** nodes. SPP publishes real-time $\pi^{\mathcal C}$ together with the binding constraints and their shadow prices $\mu$ (so ground truth is available for validation). Of **288** intervals, **249** have one or more binding constraints; **6** lines congest during the day. Because SPP uses a **lossy** model, the raw $\pi^{\mathcal C}$ is first de-meaned to strip $\pi_2$ (their Fig. 11 shows intervals 3 and 5 â€” both single-line â€” collapsing to nearly identical nodal congestion-price ratios after the correction, confirming the fix works). Then bottom-up runs: Round 1 finds 2 rank-1 clusters of sizes 147 and 17 â†’ 2 bases, leaving 85 intervals; Round 2 finds 3 clusters (sizes 39, 20, 10); Round 3 finds the last basis. **Total miscode rate 0.54%** (per-line: 0, 0.80%, 1.61%, 0, 0, 0.80%). This is the paper's proof that the method survives contact with real, lossy market data.
+
+### Runtime (Table IV)
+
+Repeating each case 50Ã—, PCA runs in 0.002â€“0.08 s, and individual rounds up to ~1.22 s (the 200-bus Round-1 DPCP is the heaviest). **The full identification costs a few seconds or less in every case** â€” consistent with the $O(M^3)$ SVD being the practical bottleneck at these data sizes.
+
+**Summary of accuracy (Table III):** 30-bus 0.39%, 118-bus 0, 200-bus 0, SPP 0.54% â€” "nearly 100% accuracy" across synthetic and real data.
+
+---
+
+## 6. Section V â€” Discussion and conclusion
+
+### 6.1 Applications
+
+The method converts public LMPs into the network congestion status, which the authors argue is valuable in three ways:
+
+1. **Revealing congestion status where it isn't published** â€” most directly useful for emerging markets (they name China and Mexico) that release LMPs but not binding-constraint information.
+2. **Forecast calibration / reconciliation** â€” LMP forecasts from generic models (neural nets, SVMs) do not respect the subspace geometry of Â§II. Given the recovered basis vectors, one can *reconcile* raw forecasts onto that structure via quadratic programming (hierarchical/grouped-forecast reconciliation), producing "structurized" forecasts that are internally consistent with the market's congestion geometry.
+3. **Fusing with exogenous variables** â€” since congestion status is a function of loads, offers, and line capacities, a fitted map from exogenous drivers (nodal loads, generation mix) to status enables congestion forecasting, FTR valuation, and quantification of individual generators' market power.
+
+### 6.2 Conclusion
+
+The congestion component of LMP is low-rank; identifying congestion status is therefore a subspace-detection problem, solved by recovering a basis set and the per-point coefficients. Two complementary hierarchical searches do the recovery â€” bottom-up peeling (which also hands you part of the PTDF matrix as directions) and top-down hyperplane detection (which bridges basis gaps). Four cases, one with real data, show near-100% accuracy in seconds. Stated future work: couple the identifier to forecasting and bidding-strategy pipelines.
+
+---
+
+## 7. Appendix â€” LMP for multi-interval / look-ahead SCED
+
+The purpose is to show the LMP decomposition is *form-invariant* under the inter-temporal constraints that modern markets are adopting, so the whole method still applies.
+
+**Model.** Over a horizon $t=1,\dots,T$, minimize total offered cost subject to: per-interval balance with loss ($\lambda[t]$); loss linearization ($\sigma[t]$); **ramping** $|P_{Gi}[t]-P_{Gi}[t-1]|\le R_i\Delta T$ ($\omega[t]$); a generic non-inter-temporal constraint $C[t]P_G[t]\le b[t]$ ($\tau[t]$); generation limits ($\gamma[t]$); and loss-adjusted flow limits ($\mu[t]$).
+
+**The LMP.** Differentiating the Lagrangian w.r.t. demand,
+$$
+\pi[t] = \lambda[t]\mathbf 1 - \sigma[t]\,LF[t] - T^\top(\mu_{\max}[t]-\mu_{\min}[t]).
+$$
+Note what *survives* the derivative: demand enters only the balance, loss, and flow constraints, so **only $\lambda, \sigma, \mu$ appear** â€” the ramping duals $\omega$ and the generic duals $\tau$ do **not** show up directly in the LMP. They reshape the *primal* solution and hence the *values* of $\lambda, \sigma, \mu$, but they add no new term to the price.
+
+**Closing the loop via the loss KKT condition.** Stationarity in the loss variable gives
+$$
+0 = \frac{\partial\mathcal L}{\partial l[t]} \ \Rightarrow\ \lambda[t]-\sigma[t] = d[t]^\top T^\top(\mu_{\max}[t]-\mu_{\min}[t]).
+$$
+Substituting back,
+$$
+\pi[t] = \sigma[t]\mathbf 1 - \sigma[t]\,LF[t] - T^\top(\mu_{\max}[t]-\mu_{\min}[t]) + \mathbf 1\cdot d[t]^\top T^\top(\mu_{\max}[t]-\mu_{\min}[t]),
+$$
+which is **identical in form to the single-period lossy LMP** (eq. 5), with $\mu = \mu_{\min}-\mu_{\max}$. Conclusion: ramping and other inter-temporal constraints move the dual values but leave the energy/loss/congestion decomposition intact, so $\pi^{\mathcal C}$ still lies in the span of the binding lines' PTDF rows and the identification method remains valid for look-ahead SCED.
+
+---
+
+## 8. Critical assessment (my analysis, not the paper's)
+
+The core geometric argument is clean and correct, and the two-search design genuinely handles the nested-subspace case that defeats standard clustering. Where I would push back or flag caveats:
+
+**What "congestion status" you actually recover.** The output $\mathfrak X_t$ is an *abstract pattern code* over basis indices, not a mapping to *named physical lines*. Bottom-up recovers basis vectors only up to sign and scale, so you get the *directions* of the binding lines' PTDF rows, not the calibrated PTDF magnitudes or signs. To attach physical line identities you still need side information (as in Case 4, where SPP publishes the binding constraints and lets them validate). So "recovers part of the PTDF matrix" should be read as "recovers a subspace basis consistent with those rows," not a metric reconstruction. For their downstream forecasting-reconciliation use this is enough; for physical attribution it is not.
+
+**The fixed-topology-within-window assumption.** The entire construction presumes a *constant* $T$ (and constant offer structure defining the SPRs) over the estimation window. Real networks reconfigure â€” line switching, outages, seasonal ratings, topology optimization â€” which rotates the subspaces mid-window. This creates a genuine tension: the window must be long enough to *populate* each subspace with enough points (especially for RS, whose success is $\sim q^{k-1}$) but short enough that topology is stationary. The paper's single-day SPP test sidesteps this; a multi-week deployment would have to detect and segment topology changes first.
+
+**Rare-pattern fragility.** Accuracy hinges on each subspace being well-sampled. Statuses that occur rarely (small inlier fraction $q$) are exactly the ones RS struggles to find, and the exponential-in-$N$ guarantee is cold comfort when $q^{k-1}$ is minuscule. The reported miscode rates are dominated by the *frequent* patterns; a per-pattern (rather than per-line) error breakdown would reveal how the tail patterns fare, and I'd expect that to be the weak spot.
+
+**Hyperparameter sensitivity is under-explored.** The cutoff $\varepsilon$, the RS acceptance threshold $p$, the local-optimum acceptance threshold in top-down, and the eigengap-based cluster count are all consequential, and the eigengap heuristic is known to be brittle under noise. With only 3% Gaussian perturbation in the synthetic cases and one clean real day, the robustness envelope isn't mapped. Heavier noise, or the marked-vs-traded staleness artifacts you see in illiquid back-contract data, could blur the near-collinearity that $\kappa$ relies on.
+
+**Degeneracy and accidental collinearity.** The method resolves *nesting* but not *coincidence*: two physically distinct binding sets whose PTDF-row spans happen to align (or nearly align) will be merged into one status. Primal degeneracy (a line at its limit with $\mu=0$) also muddies the support recovery near thresholds. Neither is discussed.
+
+**External validity.** The real-data validation is a single day at a single RTO with a favorable property (SPP publishes $\pi^{\mathcal C}$ and $\mu$ directly). The DC-OPF/PTDF linearization is itself an approximation of AC reality; the appendix extends to inter-temporal constraints but not to AC effects, unit-commitment binaries, or reserve/FCAS co-optimization, any of which can perturb the clean $T^\top\mu$ form.
+
+None of these sink the contribution â€” the subspace insight is real and the algorithm is a sensible, efficient way to exploit it â€” but they bound where I'd trust it out of the box.
+
+---
+
+## 9. Connection to regional markets (NEM)
+
+The paper is nodal-LMP-centric, but the underlying move â€” *infer the binding-constraint structure from public price data via an identifiability argument* â€” is the same one your revealed-defence and bid-markup-inversion estimators make from AEMO dispatch and financial disclosures. Two translation notes:
+
+- **Regional, not nodal.** The NEM prices to Regional Reference Prices, not nodal LMPs, so the clean $\pi^{\mathcal C}=T^\top\mu$ subspace lives in the space of *constraint* shadow prices rather than nodal prices. AEMO's binding constraint equations play the PTDF-row role: the LHS coefficient vector of each binding generic constraint is the sensitivity direction, and the marginal value is the analog of $\mu_j$. The "only a few constraints bind at once â†’ congestion prices span those coefficient rows" logic carries over directly to the constraint-equation framework.
+- **Where the value is different.** The paper's headline use case â€” recovering congestion status in markets that *don't* publish it â€” is less pressing for the NEM, since AEMO publishes binding constraints and their marginal values (like SPP). For your work the payoff is more in (a) the *forecast-reconciliation* application â€” projecting your regime-switching / jump-diffusion price-path simulations onto the recovered constraint subspaces so simulated congestion prices are structurally admissible â€” and (b) as an *identifiability sanity check* on position/defence inference: if two constraint patterns share a subspace, they're not separately identifiable from price data alone, which is exactly the kind of caveat your two-regime (below/above-\$300) inversion is designed to respect.
+
