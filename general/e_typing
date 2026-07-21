@@ -1,0 +1,138 @@
+# NEMDE E-Type Terms — Complete Taxonomy & a Forward-RHS Forecasting System
+
+## 0. Purpose
+
+Map every family of **E ("Entered value")** RHS term in NEMDE constraint equations to a forecast you can produce, and propose an architecture that computes forward constraint-RHS distributions **coherently with your existing price/dispatch simulation** — so binding constraints are consistent with the prices you already simulate.
+
+---
+
+## 1. Recap — what "E" is
+
+Each RHS term carries a single-character SPD type telling NEMDE how to source and manipulate its value. `E` = *entered, time-varying input data* that AEMO enters/imports rather than reading live from SCADA (`A`/`S`), the market solve (`I`/`T`), or region-demand telemetry (`R`).
+
+The load-bearing fact: **in dispatch, E-values are the current entered values; in pre-dispatch/PASA they are the *forecast* entered values.** E is therefore the exact channel through which AEMO's own forward RHS absorbs forecasts — which is why it's the right hook for your forward work.
+
+---
+
+## 2. The complete E-type population
+
+Five systematic families + a residual. IDs follow AEMO's *Constraint Naming Guidelines*; any E-term can be classified by regex on its ID.
+
+### 2.1 Transmission element ratings — the dominant family
+
+Never hard-coded: the term carries a **Rating ID** that NEMDE resolves to the current value, so one ID transparently delivers static, dynamic, or hand-dressed values.
+
+**ID grammar (Naming Guidelines §7.2):**
+- Lines: `{Rgn}RAT{Time}_{FromSub}{ToSub}{LineNo}`
+  e.g. `NRATCN_CNUT01` (continuous, Canberra→Upper Tumut 330 kV line 01), `QRAT15_CLWU871` (15-min, Calvale→Wurdong), `NRATSE_MNDT8` (sustained emergency, Marulan→Dapto (8))
+- Transformers: `{Rgn}RAT{Time}_{Sub}_TX{No}`
+  e.g. `TRAT4H_BU_TX2` (4-hour, Burnie No.2 220/110 kV tx)
+
+**Rating-time codes:** `CN` continuous · `SE` sustained emergency (= post-contingent continuous) · `SH` short-time · duration ratings `4H`/`2H`/`30`/`20`/`15`/`10`.
+
+**Three *levels* behind the ID** (constraint picks one based on the contingency): `NORM` (continuous, pre-contingent) · `EMER` (emergency, contingency, no time limit) · `LDSH` (load-shed, ~15 min post-contingent).
+
+**Three *sourcing modes*:**
+- **Static / "workbook"** — fixed by season (summer/winter/spring/autumn) and time-of-day (day/night). A deterministic calendar.
+- **Dynamic** — real-time telemetered, moving with ambient temperature, wind speed, line loading. VIC/TAS are explicitly temperature-based; VIC publishes three dynamic values (continuous, 15-min, 5-min).
+- **Hand-dressed** — manual urgent overrides. Unforecastable; comes from operational advice.
+
+**Forward wrinkle:** near-term ratings are overridden by the live dispatch value for a fixed number of pre-dispatch intervals (**EMS Override**: 1 for NSW lines only, 80 for QLD lines & transformers, 15 elsewhere), then fall back to the season/time value or a default temperature profile.
+
+### 2.2 Sub-regional (area) demand forecasts
+
+A partition of regional demand into load areas.
+- IDs: `{Rgn}RLOAD_{Area}` e.g. `QRLOAD_CEN`; in practice also region-prefixed area names like `N_NORTH`, `N_SYDNEY`, `N_CANBERRA`, `N_SWNSW`, `N_CENWEST`.
+- Sometimes assembled inside a **constraint function** (`X` type), e.g. `ARMIDALE_AREA_LOAD` ("Terranora load calculation for Pre-dispatch and PASA").
+- Dispatch/first PD interval → SCADA area demand; beyond that → the area demand **forecast**.
+
+### 2.3 Zone demand forecasts
+
+Finer named zones. IDs: `{Rgn}_{ZoneName}` e.g. `S_SOUTHEAST`. Same forecast behaviour as areas.
+
+### 2.4 Non-scheduled wind forecasts (AWEFS)
+
+**Only non-scheduled wind** — semi-scheduled wind is dispatchable and sits on the *LHS* as a `T` term, so it is never an E-term.
+- IDs: `WIND_{Rgn}_{XXX}` e.g. `WIND_N_CAP` (Capital), `WIND_N_CLR` (Cullerin Range).
+- Value = AWEFS forecast; enters with a **negative** sign convention (moved-to-RHS non-scheduled wind is multiplied by −1).
+
+### 2.5 Non-scheduled / distributed solar forecasts (ASEFS)
+
+Rooftop PV & non-scheduled solar from ASEFS.
+- IDs: `{Area}_ASEFS2` e.g. `NSW_ASEFS2`, `QLDSOUTH_ASEFS2`, `QLDCENTRAL_ASEFS2`, `VIC_ASEFS2`, `SA_ASEFS2`.
+- Used e.g. in the load-relief constraint function to reconstruct **underlying** demand (metered demand + behind-the-meter PV).
+
+### 2.6 Residual — other entered operational values
+
+"Entered value" is a catch-all, so a minority of E-terms carry manually entered, time-varying data outside the above: entered operating limits/margins that vary, entered event sizes, entered inputs to a stability calculation. Constraint-specific and not systematically named — **harvest empirically and treat individually.**
+
+---
+
+## 3. Mapping E-families to your forecasts
+
+**Structure is free; only values need forecasting.** The factors, constants, scale, RPN operators, and *which* E-IDs appear all come straight from AEMO's published pre-dispatch/PASA formulation — you never estimate them. Your only job is each E-term's forward **value**.
+
+**The coherence insight:** every E value is a (near-)deterministic function of a small common state — demand, temperature, wind, solar — that your price simulation already produces. So don't forecast RHS separately from price. Evaluate *both* off the same simulated state; each draw then yields internally consistent (demand, weather, price, RHS, binding-set) tuples.
+
+| E-family | AEMO source | Your forecast analogue | Method | Forecastability |
+|---|---|---|---|---|
+| Ratings — static | Workbook season/ToD | Published TER calendar | Deterministic lookup by season/hour | **High** (deterministic) |
+| Ratings — dynamic | Real-time weather | Temperature (+wind) model | Rating curve `f(T, wind)`; share latent T with price sim | Medium |
+| Ratings — hand-dress/outage | Operational advice | Outage schedule | Scenario input, not a forecast | Low (discrete) |
+| Area / zone demand | SCADA → forecast | Your regional demand path, disaggregated | `area = share_a(season, ToD) × region_demand` | **High** (region demand already modelled) |
+| Non-sched wind | AWEFS | Your wind model | Expected output given wind state | Medium |
+| Non-sched / rooftop solar | ASEFS | Distributed-PV model | `diurnal × seasonal × clear-sky × cloud` | Medium-High |
+
+---
+
+## 4. Proposed architecture
+
+Six layers. **L0–L1** are one-off/periodic ingestion; **L2–L5** run inside your simulation loop.
+
+**L0 — Formulation ingestion.**
+Harvest, per constraint equation and per constraint set (i.e. per network/outage condition), the full term list: SPD ID, SPD type, factor, group ID, RPN operator, scope (DS/PD/ST/MT), plus constant/margin/scale terms. Sources: `GENERICCONSTRAINTRHS` and the SPD input files (MMS/NEMWEB); `EMSMASTER` maps SPD_ID → physical measurement for A/S/I/T/R. **Keep the pre-dispatch/PASA scope rows** — there, flow terms are already recast as E-demand-sensitivity terms.
+
+**L1 — E-term classifier.**
+Regex each E-ID into a family (rating-line / rating-tx / area-demand / zone-demand / non-sched-wind / non-sched-solar / residual) and extract structured keys (element, endpoints, rating-time, region/area). Attach the term's factor — the demand-transfer sensitivity `s_i`, the rating coefficient, etc.
+
+**L2 — Forecast providers.**
+One module per family, each exposing `value(term_key, interval, state) → MW | rating`, driven by the common state vector from your simulation:
+- *Rating provider* — static → calendar lookup; dynamic → `f(T_region(t), wind(t))`; apply EMS-override near t=0; outage/hand-dress from L4.
+- *Demand provider* — `area/zone = disaggregation_share(area, season, ToD) × region_demand(t)` (region demand = your existing sim path).
+- *Wind provider* — expected non-scheduled wind output given wind state.
+- *Solar provider* — distributed PV given time-of-day, season, cloud/irradiance state.
+
+**L3 — RPN RHS evaluator.**
+Per constraint & scenario, run the published RPN stack (PUSH/ADD/MUL/DIV/MAX/MIN/STEP/…, with groups and constraint functions on their own stacks) using L2 values for E-terms, published constants/margins/scale for C/U-terms, and expected output for the residual small-factor generator/interconnector RHS terms. Output: an RHS value — and, across scenarios, an **RHS distribution** — per constraint per forward interval.
+
+**L4 — Outage / constraint-set scenario manager.**
+This is the **dominant forward uncertainty**, not the E-values. Each network condition invokes a different constraint set with its own RHS formulation. Build a scenario layer over (a) planned outages (AEMO outage schedule / MT-PASA) and (b) a stochastic forced-outage/derating process. Each scenario selects active constraint sets; pre-dispatch/PASA already publish which equations are invoked or forecast-invoked as your near-term anchor.
+
+**L5 — Binding & valuation integration.**
+For each simulated (state, outage-scenario): test LHS feasibility against L3 RHS, identify binding constraints, translate to congestion / price separation / dispatch limits, then into your spark-spread / cap / forward-margin objective. Because L2 shares state with your price simulation, binding is coherent with the prices you're already simulating.
+
+```
+         ┌────────────── one-off / periodic ──────────────┐
+   MMS/NEMWEB ─► L0 formulation ─► L1 E-term classifier ──┐
+                                                          ▼
+   common state  ─────────────────────►  L2 forecast providers
+   (demand, T, wind,                       (rating/demand/wind/solar)
+    solar, gas — from                              │
+    your price sim)                                ▼
+   outage schedule ─► L4 scenario mgr ─►  L3 RPN RHS evaluator
+                             │                     │
+                             └──────────►  L5 binding + margin/spread valuation
+```
+
+---
+
+## 5. Design decisions, caveats, open questions
+
+- **Use the PASA/pre-dispatch formulation, never dispatch.** ST/MT PASA drop A, S, I types entirely; pre-dispatch recasts flow terms as E-demand-sensitivity terms — so the forward RHS is, by construction, almost all forecastable inputs. Anchor there.
+- **Sensitivities are read, not estimated.** Demand-transfer factors are constraint- and orientation-specific and published in the formulation. Re-harvest whenever AEMO reissues the constraint (they move with topology).
+- **Outage state dominates.** Getting the constraint-set invocation *distribution* right matters more than precision on any single E-value. Invest in L4.
+- **Ratings jump discretely.** EMS-override near-term + outage/hand-dress → model as scenario inputs, don't smooth.
+- **Temperature is your one genuinely new module.** Static ratings are a calendar; demand you already have. The new build is a temperature (and, for some elements, wind/irradiance) model for dynamic ratings — and it doubles as a demand and renewable driver, so it earns its keep. (Eydeland–Wolyniec's temperature term-structure models are directly usable.)
+- **Semi- vs non-scheduled.** Only non-scheduled wind/solar are E-terms; semi-scheduled units are LHS `T`-terms whose UIGF belongs in dispatch, not the RHS.
+- **Open — resolution.** At 5-min, dynamic ratings and solar have strong intraday structure worth carrying; area-demand shares can stay coarser (30-min/hourly) and be interpolated. Decide per family.
+- **Open — coupling depth.** Simplest: E-providers are deterministic functions of your existing state. Richer: add rating/wind/solar forecast *error* as extra stochastic factors (matters for tail congestion and cap payoffs). Start deterministic; add error only on terms your sensitivity analysis flags as binding-critical.
