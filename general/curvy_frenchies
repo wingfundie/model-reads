@@ -1,0 +1,1285 @@
+# NEM Gas Generator Forward Margin, Hedging Supply Curve & Position Inference
+
+### A Consolidated Trading-Desk Methodology
+
+*Everything from first principles: the cap-based margin equation and its dispatch/commitment machinery, the desk presentation layer, the reservation-price supply curve that predicts where generators hedge, the empirical position-inference layer that calibrates it, and the reference implementation.*
+
+---
+
+## Table of contents
+
+| Part | Module | Question it answers |
+|---|---|---|
+| **0** | Scope & architecture | What are the pieces and how do they connect? |
+| **I** | **A — Cap-based margin valuation** | What is this generator worth, and what is its risk? |
+| **II** | **B — Valuation & trading pack** | How does a desk read, trust and trade the number? |
+| **III** | **C — Hedging supply curve** | At what swap/cap level does each owner become a willing seller? |
+| **IV** | **D — Position inference & calibration** | What did generators *actually* hedge, and does the model reproduce it? |
+| **V** | **E — Reference implementation** | Runnable code, and where the real engine plugs in |
+| **VI** | Cross-cutting | Pitfalls, validation gates, data sources, build order |
+| **App.** | Reference cards | Master equations, notation, current NEM parameters |
+
+---
+
+# PART 0 — Scope, thesis and architecture
+
+## 0.1 The thesis
+
+The starting point is a margin page that values a NEM gas generator as a **flat baseload swap** on a single price path:
+
+$$\Pi_{\text{old}} \approx (F - \mathrm{SRMC}) \times \text{flat volume}$$
+
+This is structurally wrong for a peaker, and the correct frame is:
+
+> The generator **sells $300 cap contracts**, collects the cap **premium** as carry, and **turns on to defend the caps** when there is risk of spot exceeding $300. Its margin is the cap premium plus the energy spread it captures, less the cost of generation and the cost of being available.
+
+The reason is structural, not stylistic:
+
+- A baseload swap is a **linear** payoff in spot. A flat block is hedged by a flat block.
+- A gas peaker's physical output is a **convex, option-like** payoff: it generates — and earns — only in intervals where $S > \mathrm{SRMC}$. In payoff terms it is a *strip of spark-spread options*, which in the NEM is economically a *strip of ~$300 caps*.
+- You hedge an instrument with another instrument of the **same payoff shape**. The cap matches the asset; the swap does not.
+
+A swap hedge on a peaker leaves you short a linear instrument while long a convex asset — a shape (gamma) mismatch that systematically misstates margin. The cap collapses that mismatch.
+
+**The one caveat, stated up front.** This framing is most exact for **OCGT peakers** — and any unit whose SRMC sits high on the price-duration curve, so it runs only in the peaks. A **CCGT running mid-merit or baseload** legitimately carries a swap on its baseload block *plus* caps on its peaking tail. The general principle: **the hedge instrument must match the physical run profile**, and the run profile is determined by where SRMC sits relative to the price-duration curve. The cap-based method is the peaker limit; the mixed case is a linear combination of a swap leg and a cap leg. Both legs are carried explicitly throughout this document.
+
+## 0.2 The five modules and what each one does
+
+**Module A — Cap-based margin valuation (Part I).** Simulates 5-minute joint power–gas paths, dispatches each unit under a non-anticipative commitment policy, and evaluates the master margin equation per path. Outputs a *distribution* of quarterly margin per unit, decomposed into energy spread, premium carry, cap payouts and commitment drag.
+
+**Module B — Valuation & trading pack (Part II).** The presentation and decision layer: seven tiers of analytics that turn the distribution into a trade ticket a desk will act on, plus the credibility charts that make a sophisticated desk believe it.
+
+**Module C — Hedging supply curve (Part III).** Takes each *owner's* netted margin distribution and extracts the **reservation price** of each hedge instrument — the level at which the owner is just willing to sell the marginal MW. Sweeping price traces a supply curve; summing horizontally across owners and adding the retailer demand side predicts the clearing premium, which is then read against the ASX screen.
+
+**Module D — Position inference & calibration (Part IV).** Recovers, from public data, the positions generators actually hold — three estimators of increasing rigour, reconciled against open interest — and then tunes the Module C risk parameters so predicted supply matches inferred actuals. This is the empirical discipline that gives the supply curve standing to predict.
+
+**Module E — Reference implementation (Part V).** A runnable Python package implementing Modules C and D against a defined engine seam, with a synthetic stub engine so the pipeline runs end-to-end before the production engine is wired in.
+
+## 0.3 Architecture and data flow
+
+```
+   HISTORICAL DATA                MARKET DATA               UNIT/PORTFOLIO DATA
+   AEMO 5-min RRP,          ASX swap F_Q, cap p_Q,      heat rate, VOM, FOM, start
+   dispatch, bids,            open interest by            cost, min up/down, ramp,
+   gas hub prices             quarter × region            MLF, outage rates, retail book
+        │                            │                            │
+        └──────────────┬─────────────┴────────────┬───────────────┘
+                       ▼                          ▼
+        ┌──────────────────────────┐   ┌────────────────────────┐
+        │  PRICE / GAS SIMULATOR   │   │  SRMC & COST STACK     │
+        │  5-min, joint, calibrated│──▶│  SRMC_i(gas, load)     │
+        │  level→swap, tail→cap    │   │  SC, no-load, FOM      │
+        └──────────────────────────┘   └────────────────────────┘
+                       │                          │
+                       └──────────┬───────────────┘
+                                  ▼
+                 ┌────────────────────────────────────┐
+                 │  MODULE A — COMMITMENT + DISPATCH  │
+                 │  non-anticipative policy → G_i     │
+                 │  master equation → path margin Π   │
+                 └────────────────────────────────────┘
+                                  │
+                    per-unit margin distribution
+                                  │
+            ┌─────────────────────┼──────────────────────┐
+            ▼                     ▼                      ▼
+   ┌─────────────────┐  ┌───────────────────┐  ┌──────────────────────┐
+   │  MODULE B       │  │  NET BY OWNER     │  │  fair value p*, F*   │
+   │  trading pack   │  │  gen + renew      │  │  vs ASX screen       │
+   │  7 tiers        │  │  − retail  → M_o  │  │  (the edge)          │
+   └─────────────────┘  └───────────────────┘  └──────────────────────┘
+                                  │
+                                  ▼
+                 ┌────────────────────────────────────┐
+                 │  MODULE C — SUPPLY CURVE           │
+                 │  per-owner mean-var-CVaR program   │
+                 │  price sweep → q*(p)               │
+                 │  horizontal sum + retailer demand  │
+                 │  → clearing premium, implied λ     │
+                 └────────────────────────────────────┘
+                                  ▲
+                                  │  calibrate λ, γ, constraints (Step 15)
+                                  │
+                 ┌────────────────────────────────────┐
+                 │  MODULE D — POSITION INFERENCE     │
+                 │  11 financial regression           │
+                 │  12 revealed defence (AEMO)        │
+                 │  13 markup inversion, </> $300     │
+                 │  14 OI reconciliation (ceiling)    │
+                 └────────────────────────────────────┘
+```
+
+**The single coherence requirement.** Every module must be driven off the *same* simulated state. The price simulator, the gas process that sets SRMC, and the scenario vectors that feed the supply-curve optimisation are one object, not three. Decoupling them introduces internal inconsistency that contaminates both the hedging and dispatch outputs — the gas spike that compresses defence margin must be the *same* event that makes the cap pay, or the model will systematically understate the risk it exists to measure.
+
+## 0.4 Master notation
+
+Used consistently throughout. Module-specific symbols are introduced where they first appear.
+
+| Symbol | Meaning | Units |
+|---|---|---|
+| $i$ | dispatch interval index (5-minute) | — |
+| $\Delta t$ | interval length | hours ($=1/12$) |
+| $H$ | hours in the contract quarter | hours ($\approx 2184$) |
+| $j = 1\ldots J$ | Monte Carlo scenario (path) index | — |
+| $g$ | generation unit (DUID) index | — |
+| $o$ | owner / participant index | — |
+| $S_i$ | regional reference price (RRP) in interval $i$ | \$/MWh |
+| $\bar S$ | quarter time-weighted average RRP (random) | \$/MWh |
+| $\bar C$ | quarter average cap payout per MWh, $\tfrac{1}{H}\sum_i \max(S_i-K,0)\Delta t$ | \$/MWh |
+| $K$ | cap strike ($=300$, ASX product convention) | \$/MWh |
+| $L$ | marginal loss factor (MLF) of the unit | — |
+| $G_i$ | generation in interval $i$, $G_i \in [0, C_i]$ | MW |
+| $C_i$ | available (outage-adjusted) capacity | MW |
+| $P_{\min}$ | minimum stable generation | MW |
+| $\mathrm{SRMC}_i$ | short-run marginal cost (load- and gas-dependent) | \$/MWh |
+| $N$ | volume of $300 caps **sold** (short) by the unit | MW |
+| $p$ | cap premium rate | \$/MWh |
+| $F$ | swap strike / price level | \$/MWh |
+| $\mathrm{SC}$ | start cost (fuel + wear) per start | \$ |
+| $\mathrm{FOM}$ | fixed O&M for the quarter | \$ |
+| $M_o$ | owner $o$'s **net** unhedged portfolio margin for the quarter (random) | \$ |
+| $q_{sw}, q_{cap}$ | MW of swap / cap **sold** (short) by the owner | MW |
+| $\lambda$ | risk-aversion coefficient (mean-variance) | \$$^{-1}$ |
+| $\gamma$ | tail-aversion weight (mean-CVaR) | — |
+| $\alpha$ | CVaR confidence level (e.g. 5%) | — |
+| $\bar q$ | contract cover / contracted volume (inference layer) | MW |
+
+$L$ (MLF) scales **revenue**: the generator is paid $\mathrm{RRP} \times \mathrm{MLF}$ on metered output. The cap settles on RRP **unadjusted**. This asymmetry is a real basis, treated in §I.5.
+
+---
+
+# PART I — MODULE A: Cap-based margin valuation
+
+Work at native dispatch resolution — 5-minute, post-5MS.
+
+## I.1 The master per-interval equation
+
+The generator's financial position in interval $i$ is **physical asset + short cap + premium carry**. As a single expression:
+
+```
+π_i = Δt · [  G_i·(L·S_i − SRMC_i)      ← physical spark spread on dispatched MWh
+            − N·max(S_i − K, 0)         ← short-cap payout (financial, paid regardless of G)
+            + N·p                       ← cap premium accrual
+           ]
+```
+
+$$\boxed{\;\pi_i = \Delta t\Big[\,G_i\,(L\,S_i - \mathrm{SRMC}_i)\;-\;N\,\max(S_i-K,0)\;+\;N\,p\,\Big]\;}$$
+
+Over the quarter, with the commitment costs the per-interval term does not capture:
+
+$$\Pi \;=\; \sum_i \pi_i \;-\; \sum_{\text{starts}} \mathrm{SC} \;-\; \mathrm{FOM}$$
+
+Minimum-load running is handled by setting $G_i = P_{\min}$ in "ready-but-idle" intervals — the unit is synchronised, burning fuel, waiting to defend. $\mathrm{SC}$ is charged once per off→on transition. This is the unit-commitment form of commitment drag (min-load, start, no-load, FOM).
+
+**Three properties of this equation, each of which resolves a common modelling error:**
+
+**(1) The cap term does not depend on $G_i$.** $\max(S_i - K, 0)$ is owed whether or not you generate. Generating does not *earn* the cap; it *physically offsets* the liability. This is the precise meaning of "defending the cap."
+
+**(2) Optimal dispatch is $L\,S_i > \mathrm{SRMC}_i$, full stop.** Differentiate $\pi_i$ with respect to $G_i$: the marginal MWh is worth $L S_i - \mathrm{SRMC}_i$, and the cap term is constant in $G_i$. So you run flat out when $L S_i > \mathrm{SRMC}_i$ and stay at zero otherwise — *independent of the cap*. **The cap changes the commitment decision (whether to be online and ready), not the marginal dispatch decision.** Models that let the cap alter the dispatch rule are wrong.
+
+**(3) The premium is collected in every interval.** $+N p \Delta t$ appears in all branches. The intuitive distinction — premium is "clean" when $S < 300$, "consumed" when $S > 300$ — is an *interpretation* of the same cash flow, not a different cash flow. Keep $+Np$ everywhere or the margin is biased.
+
+## I.2 Case recovery — every dispatch case falls out of the one equation
+
+Set $L = 1$ for clarity (MLF restored in §I.5). Each hand-written case is a special evaluation of $\pi_i$:
+
+**Case A — $S < 300$, unit off ($G = 0$).**
+$$\pi = \Delta t\,[\,0 - 0 + Np\,] = \Delta t\,N p$$
+Pure premium accrual.
+
+**Case B — $S < 300$, unit on ($G > 0$, because $S > \mathrm{SRMC}$) — "under-cap, optimal."**
+$$\pi = \Delta t\,[\,G(S - \mathrm{SRMC}) + Np\,]$$
+Spark spread **plus** premium. Note SRMC is per *dispatched* MWh, i.e. multiplied by $G$.
+
+**Case C — $S > 300$, defended ($G = N$) — "over-cap, generated."**
+$$\pi = \Delta t\,[\,N(S - \mathrm{SRMC}) - N(S - 300) + Np\,] = \Delta t\,[\,N(300 - \mathrm{SRMC}) + Np\,]$$
+The effective realised energy price is **capped at \$300**, less SRMC, plus premium.
+
+**Case D — $S > 300$, *not* defended ($G = 0$) — the disaster case.**
+$$\pi = \Delta t\,[\,0 - N(S-300) + Np\,] = \Delta t\,[\,Np - N(S-300)\,]$$
+You owe the full cap payout with no physical offset. With $S$ able to reach the MPC, this is the dominant risk in the entire problem.
+
+**Case E — partial defence ($0 < G < N$)** is the case rarely written down and where real units actually live. It is not a separate formula; it is the general equation, and §I.3 decomposes it.
+
+## I.3 The covered / uncovered decomposition — and why $N$ vs capacity is the real risk lever
+
+When $S > K$ and the unit generates $G$ (not necessarily equal to $N$), rearrange the spike-interval payoff:
+
+$$\boxed{\;G\,S - N(S-K) \;=\; \underbrace{K\,G}_{\text{covered MW earn }\$300} \;-\; \underbrace{(N-G)\,(S-K)}_{\text{uncovered MW lose }(S-K)}\;}$$
+
+This is the clean statement of cap defence:
+
+- **Covered megawatts** — the $G$ you actually get online — each earn a net **\$300**, regardless of how high $S$ goes. The upside above \$300 was sold for the premium.
+- **Uncovered megawatts** — $(N-G)$, the caps sold but not backed by generation — each **lose $(S-K)$**. At the MPC this is catastrophic.
+- If $G > N$ (capacity beyond the caps sold), the term flips sign to $+(G-N)(S-K)$: the **merchant tail** — open capacity capturing the full spike. This is the upside retained by *not* selling caps on 100% of capacity.
+
+**Implication for sizing $N$.** $N$ is a risk-management choice, not a given. Selling caps on more MW than you can *reliably* generate during a spike manufactures the uncovered tail. The trade-off is premium income (rises with $N$) against tail risk (rises with $N -$ reliable capacity). The Eydeland–Wolyniec load-cap/insurance result applies directly: if the dominant concern is rare large losses, the optimal short-cap volume is bounded by the volume you can physically defend with high probability — typically a **haircut to nameplate** reflecting forced-outage rate and start reliability, **not** nameplate itself. That haircut is quantified by the spike capture rate (§II Tier 3.2) and becomes the hard constraint $\bar q_{cap}$ in the supply-curve program (§III.5).
+
+## I.4 The MLF basis on the hedge
+
+Restore $L$. In a fully defended spike ($G = N$):
+
+$$L\,N\,S - N(S-K) \;=\; N\,\big(K - (1-L)\,S\big)$$
+
+A "covered" position is therefore **not** a perfect \$300 lock. With $L < 1$ you leak $(1-L)\,S$ per MW *even when fully defended* — at high $S$ this is material. The cap is a regional-reference-node instrument; your energy is paid at the loss-adjusted local node. The residual $(1-L)S$ is genuine basis risk that a flat-swap model never surfaces, because it never modelled the cap leg separately.
+
+Numerically: at $L = 0.95$ and $S = \$10{,}000$, the leak is $\$500$/MW/h — larger than the entire defended margin $(300 - \mathrm{SRMC})$. **Refresh MLFs whenever AEMO republishes them**; the spike-interval leverage is why this matters more than the annual 1–2% MLF drift suggests.
+
+## I.5 Why cap, not swap — the comparison done properly
+
+Two distinct failures of the swap frame.
+
+### I.5.1 Shape mismatch (the structural failure)
+
+The swap-hedged P&L is:
+
+$$\Pi_{\text{swap}} = \sum_i G_i\,\Delta t\,(L S_i - \mathrm{SRMC}) \;-\; \sum_i V\,(S_i - F)\,\Delta t \;-\;(\text{commitment, FOM})$$
+
+with swap volume $V$ flat across **all** intervals. The asset generates $G_i$ concentrated in high-$S$ intervals; the swap subtracts $V(S_i - F)$ in **every** interval. In a spike the swap loses $\approx V S_i$ while the asset earns only $G_i \le C$ worth of spread. If $V > C$ you are **net short the spike** — over-hedged in exactly the tail the asset was built to capture.
+
+The cap, by contrast: pays only in the spike (matching when the asset is exposed), is sized at $N \le C$ (matching deliverable capacity), and is struck at the tail. Same shape as the asset.
+
+### I.5.2 Wrong reference price (the measurement failure)
+
+Define the **capture price** (generation-weighted):
+
+$$P_{\text{cap}} = \frac{\sum_i S_i\,G_i}{\sum_i G_i}, \qquad E = \sum_i G_i\,\Delta t \ \ \text{(generated MWh)}$$
+
+The merchant energy margin is then, for constant SRMC:
+
+$$\sum_i G_i\,\Delta t\,(L S_i - \mathrm{SRMC}) \;=\; E\,\big(L\,P_{\text{cap}} - \mathrm{SRMC}\big)$$
+
+**Headline margin = capture − SRMC on generation-weighted energy, not time-weighted flat energy.** A peaker's capture price sits far above the baseload time-weighted average $\bar S$, because it generates only when prices are high. A flat swap locks margin against $\bar S$ — the *wrong* price. The swap model hedges the wrong shape **and** measures against the wrong average. The cap-based method values the asset at its true capture price and prices the tail at the traded cap premium.
+
+### I.5.3 The economics of selling caps (why it is a business, not just a hedge)
+
+Total premium collected per quarter: $N p H$. Expected payout under the physical measure: $N H\,\mathbb{E}_P[\max(S-K,0)]$. Expected profit on the cap leg:
+
+$$N\,H\,\big(p - \mathbb{E}_P[\max(S-K,0)]\big) \;=\; N\,H \times (\text{risk premium})$$
+
+Cap **buyers** — retailers hedging their own short-tail exposure — pay up for insurance, so typically $p > \mathbb{E}_P[\max(S-K,0)]$: the seller earns a **positive risk premium** *and* reduces earnings variance. The cap-based margin therefore has two sources the swap margin cannot represent: the carry/risk-premium on the short cap, and the variance reduction from collaring the tail. The **observable ASX cap forward $p$ is the market's price of that tail**, and it is the calibration anchor for the whole tail of the price simulator (§I.8).
+
+## I.6 NEM market mechanics that bind the model
+
+Hard constraints the price simulator and the margin accounting must respect. Current values as at mid-2026; refresh annually.
+
+| Mechanic | Value / behaviour | Modelling consequence |
+|---|---|---|
+| **5-minute settlement (5MS)** | energy settles per 5-min dispatch interval | simulate at 5-min; spikes are often *single-interval*, which is why availability and ramp dominate |
+| **Market Price Cap (MPC)** | **\$20,300/MWh** FY2025-26 → **\$23,200/MWh** from 1 July 2026 (further step FY2027-28) | truncate the simulated distribution at the MPC for the relevant period; this sets the magnitude of the uncovered-tail loss |
+| **Market Floor** | −\$1,000/MWh | floor the distribution |
+| **Cumulative Price Threshold → APC** | rolling 7-day price sum breaching CPT (≈\$2.23M) triggers an Administered Price Period capping prices at the **APC of \$600/MWh** until cleared | a *state-dependent ceiling on the cumulative window*; truncates sustained scarcity. Without it, a spike-only model overstates prolonged-scarcity value |
+| **\$300 cap strike ≠ APC** | ASX cap strike is \$300 by product convention; the APC used to be \$300 but is now \$600 | do not conflate them — a common and expensive error |
+| **Regional reference price** | caps and swaps settle on the region's RRP; energy paid at RRP × MLF at the connection point | cap products are **quarterly by region**; the forward cap curve is quarter × region |
+
+## I.7 The dispatch & commitment policy — where overvaluation hides
+
+This is the crux of "as realistic as possible," and the single largest source of inflated valuations.
+
+### I.7.1 The two-layer decision
+
+- **Dispatch (intra-interval):** run iff $L S_i > \mathrm{SRMC}_i$. Trivial *given* you are online.
+- **Commitment (anticipatory):** whether to **start** — incurring $\mathrm{SC}$ plus min-load fuel losses — so that you *are* online and able to defend a spike that **has not happened yet**. A decision under uncertainty, made with only the information available at the time (pre-dispatch forecasts, current regime, recent prices) — **not** the realised path.
+
+The commitment layer is a **compound option**: the start cost is the strike on an overlying call written on the strip of spark-spread (cap-defence) payoffs. Shutting down sells that strip and stops the min-load bleed. Commitment drag is the premium paid — in physical fuel and start costs — to hold the defensive option.
+
+### I.7.2 Why perfect-foresight dispatch overvalues
+
+A MILP or DP solved over the **realised** price path has perfect foresight: it starts exactly before each spike, never starts in vain, always synchronises in time. That value is an **upper bound**, not a forecast. Reality breaks it three ways:
+
+1. **Start lead time.** An OCGT needs minutes to ~30 min from cold/warm; a CCGT needs hours. A **single 5-minute** spike can be over before a cold unit synchronises → missed capture, and if short caps, an **uncovered loss**.
+2. **Forecast error.** You start on *probability*. Sometimes the spike doesn't materialise → a **false start**: $\mathrm{SC}$ plus min-load losses spent for nothing.
+3. **Min up / min down / ramp.** Once on, minimum-up-time forces continued running (more min-load bleed) even as price falls; ramp limits cap how fast $G$ rises within the spike.
+
+The value hierarchy:
+
+```
+strip of independent spark-spread options (full optionality, no constraints)   ← upper bound
+     ≥  constrained SDP value (start cost, min up/down, ramp)
+          ≥  realistic non-anticipative policy value (forecast-driven)         ← model this
+```
+
+**The gap between the top and bottom rungs is optionality you do not actually have.** A flat-swap model sits *outside* this chain entirely — it is a mis-specified hedge P&L, not even an upper bound. Target the bottom rung.
+
+### I.7.3 Implementing the policy
+
+**Heuristic commitment rule (good first build).** Over the start-lead-time window $[t, t+\tau_{\text{start}}]$, estimate spike probability $q$ and expected uplift $\Delta$ from the simulated regime/forecast *at time $t$*. Then:
+
+$$\textbf{start if}\quad q\cdot\Delta\cdot(\text{deliverable MW}) \;>\; \mathrm{SC} + \mathbb{E}[\text{min-load loss over }\tau_{\text{start}}]$$
+
+Defend while online; shut down when the forward-looking uplift no longer covers the min-load bleed, respecting min-up-time. Transparent and tunable.
+
+**Stochastic dynamic programming (production-grade).** State $= (\text{on/off},\ \text{time-in-state},\ \text{price regime},\ \text{gas state})$. Solve the value function $V(\text{state}; t)$ backwards; the policy emerges. Critically, **drive the SDP with realistic conditioning information** (pre-dispatch-style forecasts), *not* the realised path — otherwise perfect foresight has been re-introduced through the back door.
+
+A closely related point that matters for the DP formulation: **lumpy costs change the dispatch *pattern*, not just the margin total.** Netting startup and no-load costs against margin *ex post* — while dispatching on SRMC alone — produces systematically wrong run patterns (over-starting and over-stopping), not merely wrong totals. Runtime is an *output* of the optimisation, not an input. Fast-start OCGTs sit close to the myopic SRMC rule; CCGTs and coal diverge substantially.
+
+Either way, the unit is a peaker/cycling asset with a **low at-the-money delta**: far out-of-the-money most of the time, with most of its value coming from the spike distribution — which is precisely what the cap premium prices.
+
+## I.8 The cost stack: SRMC, VOM, FOM, start and no-load
+
+SRMC is the anchor for *both* dispatch and the price at which the generator is indifferent to defending. It is the floor the whole margin sits above.
+
+$$\boxed{\;\mathrm{SRMC}_i = \mathrm{HR}(G_i)\times \big(P^{\text{gas}}_i + T^{\text{gas}}\big) + \mathrm{VOM}\;}$$
+
+- **Heat rate $\mathrm{HR}(G)$** in GJ/MWh sent-out, **load-dependent** (worse at part load). Convert efficiency $\eta$ via $\mathrm{HR} = 3.6/\eta$. OCGT $\eta \approx 33\% \Rightarrow \mathrm{HR} \approx 10.9$ GJ/MWh; CCGT $\eta \approx 50\% \Rightarrow \mathrm{HR} \approx 7.2$ GJ/MWh. Use full-load HR when defending (you run flat out), worse HR for the min-load bleed term. The distinction between **incremental** and **average** heat rate matters: the dispatch decision uses incremental, the fuel-cost total uses average.
+- **Delivered gas** $=$ commodity ($P^{\text{gas}}$: Wallumbilla / STTM hub, or contracted GSA) $+$ transport tariff ($T^{\text{gas}}$), in \$/GJ.
+- **VOM** in \$/MWh — consumables, water, non-fuel variable maintenance. Scales with output, so it *belongs* inside SRMC.
+- **Carbon** where applicable (Safeguard Mechanism liability, ACCU cost) enters as an additional \$/MWh term via the emissions intensity.
+- **MLF referencing.** SRMC is a *sent-out* cost; revenue is $L \cdot S$. Compare like with like — either gross the SRMC up by $1/L$ or net the price down by $L$, consistently.
+- **Start cost $\mathrm{SC}$ and no-load/min-load fuel are *separate* commitment-drag terms (§I.7), not part of marginal SRMC.**
+
+### The two-threshold framing
+
+There are two distinct decision thresholds and conflating them is a modelling error:
+
+1. **Output-level threshold** — governed by *incremental* SRMC: given the unit is online, produce the marginal MWh iff $L S > \mathrm{SRMC}^{\text{inc}}$.
+2. **Start/stop commitment threshold** — governed by the *lumpy* costs: start iff the expected value of being online over the commitment horizon exceeds $\mathrm{SC}$ plus the no-load/min-load burn.
+
+### FOM, and where it belongs
+
+**FOM is fixed operating & maintenance cost** — costs that don't move with generation: staffing, scheduled maintenance contracts, insurance, connection and network charges. Usually quoted in \$/MW/year. It is the counterpart to **VOM**, which *does* scale with output and therefore lives inside SRMC.
+
+The rule: **FOM never touches the marginal dispatch decision** — that remains purely $L S > \mathrm{SRMC}$. It is a sunk period cost that appears only at the bottom of the margin waterfall, determining whether the asset covers its fixed base and earns a positive *net* margin. FOM answers *"is this generator viable,"* not *"should it run this interval."*
+
+### Worked SRMC and the gas–power coupling
+
+OCGT, $\mathrm{HR} = 10.9$, delivered gas \$14/GJ, VOM \$7:
+
+$$\mathrm{SRMC} \approx 10.9 \times 14 + 7 \approx \$160/\text{MWh}$$
+
+At a *tight* gas price of \$20/GJ:
+
+$$\mathrm{SRMC} \approx 10.9 \times 20 + 7 \approx \$225/\text{MWh}$$
+
+Now the defended-spike net is only $300 - 225 = \$75$/MWh. Cap-defence economics **compress as gas rises**, and at roughly **\$27/GJ** SRMC reaches the strike — defence becomes break-even *before* MLF leakage is counted.
+
+This is exactly why **gas and power must be simulated jointly, not independently**: the spike that makes the cap pay is frequently the *same* event that spikes gas, moving SRMC against you precisely when you most need to defend. The consequence propagates all the way through to Module C, where the cap supply curve *stiffens* endogenously in tight-gas regimes (§III.7).
+
+## I.9 Price-path simulation and calibration
+
+Simulate **5-minute, jointly with gas**, then calibrate to the two traded instruments. The key structural insight: the two market anchors pin two *distinct moments* of the distribution.
+
+| Market input | Pins | Model knob |
+|---|---|---|
+| ASX quarterly **swap** $F_Q$ | the **level** $\mathbb{E}^*[\bar S]$ over the quarter | drift / mean of the price process |
+| ASX quarterly **\$300 cap** $p_Q$ | the **tail** $\mathbb{E}^*[\max(S-300,0)]$ | spike intensity & magnitude |
+
+Two equations (level, tail), two knobs (drift, spikes). **The cap premium *is* the calibration target for spike behaviour.** Spike miscalibration is the material risk in this whole model, and the \$300 cap price is the only market-observable anchor for it.
+
+### Process candidates
+
+All valid; choose for tractability versus fidelity.
+
+- **Regime-switching** (normal ~\$50 regime / spike ~\$300+ regime). Natural fit to NEM behaviour and to the cap calibration. Under regime-switching the optimal defence boundary is trivial: defend whenever the price enters the spike regime.
+- **Mean-reverting jump-diffusion (MRJD).** Continuous base plus Poisson spikes; calibrate jump intensity and size to the cap.
+- **Structural / bid-stack.** Price as residual demand against a supply stack; gas–power correlation emerges *endogenously* through the marginal unit. Heaviest, most internally consistent, and the natural home if you are already modelling the bid stack for the inference layer (§IV.13).
+- **Bootstrap / copula resampling** of historical 5-minute blocks. Preserves diurnal and weekly shape and empirical spike clustering; couple power–gas via copula.
+
+### Calibration sequence
+
+1. **Historical 5-minute data** → intra-quarter shape (diurnal, weekly), volatility, mean-reversion speed, spike clustering, and the **power–gas dependence**.
+2. **Swap forward** → shift the **level** so the time-weighted simulated mean reproduces $F_Q$.
+3. **Cap forward** → tune **spike** parameters so the risk-neutral expected cap payoff reproduces $p_Q$.
+4. **Impose NEM rails** → truncate at MPC; apply the CPT→APC administered ceiling on the rolling window; floor at −\$1,000.
+
+Do these **in order**: the level calibration is nearly orthogonal to the tail calibration, but not exactly, so iterate steps 2–3 to convergence.
+
+### Keep the two measures explicit
+
+Calibrate the **tail to $p_Q$ under the pricing measure** for no-arbitrage, but read the **physical-measure** expected payout and the full P&L *distribution* separately. The realised-margin question is a physical-measure question, and **the gap between the two measures is the risk premium being earned**. Conflating them is the single most common way these models lose desk credibility — hence the two-headline-number discipline in Module B.
+
+### An honest caveat on marking illiquid contracts
+
+ASX settlement prices for illiquid back contracts are frequently **marked or derived rather than traded**. This can induce spurious comovement between series. Where you are estimating correlations across the forward curve from settlement data, be aware that standard staleness corrections (Dimson, Scholes–Williams) may be *counterproductive* in this regime — they correct for a lag structure that isn't actually there, and can manufacture the very comovement you were trying to remove.
+
+## I.10 Margin computation and outputs
+
+**Per Monte Carlo path:**
+
+1. Simulate 5-minute $S_i$ and gas → $\mathrm{SRMC}_i$.
+2. Run the **non-anticipative commitment + dispatch policy** (§I.7) → $G_i$, starts, min-load intervals.
+3. Evaluate $\pi_i$ (master equation) per interval; sum; subtract $\sum \mathrm{SC}$ and FOM → path margin $\Pi$.
+4. Record: capture price $P_{\text{cap}}$, generated energy $E$, premium income $N p H$, cap payouts $\sum_i N\max(S_i-300,0)\Delta t$, commitment drag, and the **uncovered-MWh count** (intervals with $S > 300$ and $G < N$).
+
+**Then report across paths — and report the distribution, not just the mean**, because the entire point of the cap frame is the risk profile:
+
+- **Headline margin** per dispatched MWh: $L\,P_{\text{cap}} - \mathrm{SRMC}$, plus the cap-leg contribution $(N p H - \text{cap payouts})/E$.
+- **Mean** cap-collared $\Pi$, **and** the **left tail** (5th and 1st percentile, CVaR). The uncovered-spike scenarios are the whole risk story.
+- **Decomposition:** energy spread vs premium carry vs cap payouts vs commitment drag — so you can see *where* the margin comes from, and how the swap model misattributed it.
+
+## I.11 Validation and no-arbitrage checks
+
+| Check | Test | Consequence of failure |
+|---|---|---|
+| **Cap reprice** | simulated cap-payout distribution must reprice the traded $p_Q$ under the pricing measure | tail is mis-calibrated → **no margin number is reliable**; fix before anything else |
+| **Swap reprice** | time-weighted simulated mean must reproduce $F_Q$ | level is mis-calibrated |
+| **Defence sanity** | in backtest, the policy's $G_i$ during historical spikes should resemble realised plant behaviour (capture rate, start frequency) | if the model "defends" spikes a real OCGT physically couldn't reach, perfect foresight has leaked in |
+| **Bound check** | realistic-policy value $\le$ constrained-SDP value $\le$ unconstrained spark-spread-strip value | if the number exceeds the strip bound, there is a bug |
+| **MLF / gas refresh** | re-run on current MLFs and gas curves each cycle | stale basis and stale SRMC |
+
+## I.12 Worked example
+
+OCGT. $N = 100$ MW caps sold at $p = \$18$/MWh, $K = 300$, $\mathrm{SRMC} = \$160$/MWh, $L = 1$, one 5-minute interval ($\Delta t = 1/12$ h).
+
+Quarter premium collected: $N p H = 100 \times 18 \times 2184 \approx \$3.93\text{M}$. Per-MW per-interval premium: $18/12 = \$1.50$.
+
+| Scenario | $S$ | $G$ | $\pi_i$ (5-min) | Reading |
+|---|---|---|---|---|
+| **A** Off-peak, unit off | 80 | 0 | $(1/12)(100 \cdot 18) = +\$150$ | pure premium carry |
+| **B** Under-cap, dispatched | 250 | 100 | $(1/12)[100(250-160)+1800] = +\$908$ | spark spread **+** premium |
+| **C** Spike, **defended** | 5,000 | 100 | $(1/12)[100(300-160)+1800] = +\$1{,}325$ | energy capped at \$300, less SRMC, **+** premium |
+| **D** Spike, **undefended** | 5,000 | 0 | $(1/12)[1800 - 100(4700)] = -\$39{,}017$ | full uncovered payout — **one interval** |
+
+Scenario D at the **MPC (\$20,300)**: $\approx (1/12)[1800 - 100(20000)] \approx -\$166{,}500$ for a **single 5-minute interval**.
+
+That asymmetry — $+\$1{,}325$ for defending versus $-\$166{,}500$ for failing to — is the entire case for why **availability and the realistic commitment policy, not the dispatch arithmetic, are where the margin and the risk actually live.** It is also the single thing the flat-swap model is structurally incapable of showing you.
+
+## I.13 Module A in one paragraph
+
+Replace $(F - \mathrm{SRMC}) \times$ flat volume with: **merchant energy margin at the generation-weighted capture price, plus cap-premium carry, minus expected cap payouts, minus commitment drag** — all computed on 5-minute joint power–gas paths whose level is calibrated to the swap forward and whose tail is calibrated to the \$300 cap forward, dispatched under a forecast-driven (non-anticipative) commitment policy that respects start cost, min up/down and ramp so that optionality is not overstated. The swap frame mis-specifies both the *shape* of the hedge and the *reference price* of the margin; the cap frame fixes both and surfaces the uncovered-tail risk that is the dominant economic fact about a NEM peaker.
+
+---
+
+# PART II — MODULE B: The valuation & trading pack
+
+*The analytics, data and charts that turn the cap-margin model into something a desk understands, trusts, and trades on.*
+
+## II.0 How to frame the whole pack
+
+A desk reads **top-down** and acts in seconds. Structure every screen and every deck in this order, and never bury the decision below the diagnostics:
+
+```
+TIER 1  Decision & position        → what do I trade, and what's at risk?    (30 seconds)
+TIER 2  Value & risk attribution   → where do the value and risk come from?
+TIER 3  Dispatch & physical        → does the asset behave realistically?    (the realism gate)
+TIER 4  Sensitivities & hedge      → how do I hedge it, and what moves it?
+TIER 5  Stress & scenarios         → what breaks it?
+TIER 6  Calibration & credibility  → why should I believe the number?
+TIER 7  Term structure             → how does value sit across quarters/regions?
+```
+
+### Two numbers, two measures — keep them separate
+
+| Number | Measure | Used for | Audience |
+|---|---|---|---|
+| **Fair value of the cap strip** (and of the asset) | **Risk-neutral** (calibrated to ASX cap/swap) | marking, comparing to screen, **trade decisions** | traders |
+| **Expected realised margin + distribution** | **Physical** | budget, expected P&L, **risk limits, VaR/CVaR** | risk / management |
+
+Conflating them is the single most common way these models lose desk credibility. **The gap between them *is* the risk premium earned by selling caps** — show it explicitly in Tier 2. Label the measure on every chart.
+
+**Report per-MWh and total.** Per dispatched MWh (\$/MWh, comparable to spark spread and across units) **and** total \$ for the book.
+
+## II.1 TIER 1 — Decision & position
+
+**1.1 Quarterly margin distribution — fan or histogram.** Fan chart across quarters (median + P5/P25/P75/P95) or per-quarter histogram, with **CVaR(5%)** marked. *Shows* the full risk profile of expected realised margin. *Action:* sizing and limits — **the tail, not the mean, sets how much cap volume is prudent.** This chart justifies the whole cap framing and must be first.
+
+**1.2 Fair value vs market — the edge.** Grouped bars per quarter: model fair-value cap premium $p^*$ vs ASX traded $p_{\text{screen}}$, difference labelled in \$/MWh. *Action:* **the trade signal.** Positive $p^* - p_{\text{screen}}$ → caps look cheap; negative → the market is paying more than fair for the tail you're short.
+
+**1.3 The recommended position card** — a table, not a chart, per quarter/region:
+
+| Field | Example |
+|---|---|
+| Caps to sell $N$ | 90 MW (haircut to 100 MW nameplate for outage/start reliability) |
+| Strike | \$300 (fixed) |
+| Fair premium $p^*$ vs screen | \$21.4 vs \$18.0 → **+\$3.4/MWh edge** |
+| Expected carry (quarter) | \$X (premium − expected payout, physical measure) |
+| Breakeven premium | \$14.9/MWh (below this, don't sell) |
+| Tail (CVaR 5%) | −\$Y |
+| Cap-equiv / swap-equiv delta | short 86 cap-MW + short 12 swap-MW |
+
+*Action:* the literal trade ticket the valuation implies. Everything else supports this card.
+
+**1.4 Position vs limit gauge.** Current net short-cap MW (this asset plus correlated book) against cap-position and CVaR limits, by quarter. *Action:* whether the recommended position fits without breaching concentration or tail limits.
+
+## II.2 TIER 2 — Value & risk attribution
+
+**2.1 Value waterfall**, per quarter:
+
+```
+Merchant energy margin (capture − SRMC on generated MWh)
+   + Cap premium carry            (N·p·H)
+   − Expected cap payouts         (Σ N·max(S−300,0))
+   − Commitment drag              (starts + min-load fuel)
+   − FOM
+   = Net cap-collared margin
+```
+
+*Action:* tells the desk *which lever* drives value. If premium carry dominates, the trade is a vol-selling carry trade; if energy spread dominates, it's a spark-spread asset with a cap overlay.
+
+**2.2 Risk attribution — the same waterfall on variance / CVaR.** Stacked bar of each component's contribution to total variance and to CVaR. *Shows:* where the *risk* lives, which is usually **not** where the *value* lives — premium carry is steady, cap payouts and commitment drag carry the variance.
+
+**2.3 Capture price vs baseload vs strike — the cap-vs-swap justification.** Three bars per quarter: generation-weighted $P_{\text{cap}}$, time-weighted $\bar S$, and the \$300 strike; annotate the capture premium $P_{\text{cap}} - \bar S$. *Action:* settles the "why not just use the swap" objection in one chart. Also flags units where $P_{\text{cap}} \approx \bar S$ — really running baseload, so the swap *is* appropriate and the mixed hedge applies.
+
+**2.4 Old method vs new method — bridge.** Waterfall bridging the previous flat-swap margin to the new cap-collared margin, decomposed into shape correction, capture-vs-baseload correction, premium carry added, commitment drag netted. *Action:* essential for adoption — lets anyone who knew the old number reconcile to the new one.
+
+## II.3 TIER 3 — Dispatch & physical behaviour (the realism gate)
+
+**3.1 Dispatch profile overlaid with spot.** Dual-axis time series for a representative path and a high-spike path: generation MW (area) + RRP (line), with the \$300 strike and SRMC marked.
+
+**3.2 Spike capture rate — the availability story.** Per quarter, of intervals with $S > 300$: fraction where the unit achieved $G \ge N$ (fully covered), $0 < G < N$ (partial), $G = 0$ (**uncovered**). Stacked bar. *Action:* **the single most important realism check.** A high uncovered fraction means fair value is overstated and the CVaR is real. It directly disciplines how large $N$ can prudently be — and this number becomes the hard constraint $\bar q_{cap}$ in Module C.
+
+**3.3 Running hours by price band.** Histogram of generated MWh bucketed by price band ($<$SRMC, SRMC–100, 100–300, 300–1000, $>$1000, near-MPC). *Shows:* margin dependence on a handful of high-price intervals — fragility.
+
+**3.4 Starts & commitment-drag distribution.** Histogram of starts-per-quarter across paths; alongside, **false-start rate** (started, no spike materialised) and min-load hours. *Action:* validates the commitment policy isn't over-starting (perfect-foresight leak) or under-starting (missing defence).
+
+**3.5 SRMC moneyness on the price-duration curve.** Sorted RRP with the unit's SRMC band shaded across it; show how it shifts as gas moves. *Shows:* what fraction of the year the unit is in-the-money, and how that collapses when gas rises.
+
+## II.4 TIER 4 — Sensitivities, greeks & hedge ratios
+
+**4.1 Tornado / sensitivity bars** for a defined bump in each driver: forward power level, gas price, spike vol / cap-implied vol, power–gas correlation, MLF, start cost, forced-outage rate. *Action:* prioritises what to hedge. Power level and gas usually dominate; **correlation and MLF are the sneaky ones.**
+
+**4.2 Delta curves (power & gas) vs price level.** $\partial V/\partial F^{\text{power}}$ and $\partial V/\partial F^{\text{gas}}$ as functions of forward level, showing the **low, rising ATM delta** characteristic of a peaker. *Action:* sets the delta hedge and quantifies rebalancing (the gamma).
+
+**4.3 Cap-equivalent and swap-equivalent replication.** Per quarter, the asset's sensitivity expressed as equivalent short-cap MW $+$ equivalent swap MW replicating its forward greeks — "this asset ≈ short $N_{eq}$ caps $+$ $V_{eq}$ swaps." *Action:* **the hedge construction.**
+
+**4.4 Vega to cap-implied vol.** *Shows:* the asset is **short vol** (it sold the tail), and by how much.
+
+## II.5 TIER 5 — Stress & scenarios
+
+**5.1 Scenario impact table / heatmap** — margin impact (mean and CVaR) for each named scenario:
+
+| Scenario | Why it matters in the NEM |
+|---|---|
+| Gas spike +\$X/GJ | SRMC rises; defence margin compresses |
+| **Gas–power co-spike** | SRMC moves against you *exactly when caps pay* — the signature peaker risk |
+| Heatwave (spike frequency ×2) | more cap payouts; tests whether you're net long or short the tail |
+| Prolonged scarcity → **APC binds (\$600)** | sustained high prices truncated; caps-short capped on the upside too |
+| Forced outage during a spike | the **uncovered-tail realisation** — pure loss at near-MPC |
+| MLF cut | covered-defence leakage $(1-L)S$ widens |
+| Low-price / mild summer | premium carry intact, energy spread evaporates |
+
+**5.2 Tail decomposition (CVaR by cause).** Stacked bar of contributions to CVaR(5%) by scenario type. *Action:* hedge the dominant tail driver specifically rather than buying blanket protection.
+
+**5.3 Co-spike correlation stress.** Margin (mean and tail) as a function of the power–gas correlation assumption. *Shows:* sensitivity to the assumption that is hardest to calibrate and most consequential. *Action:* a confidence band on the valuation — and a flag if the trade only works under benign correlation.
+
+## II.6 TIER 6 — Calibration & model credibility
+
+**6.1 Reprice check — model vs traded.** Model cap-strip fair value vs ASX cap forward, model swap-implied vs ASX swap forward, with residuals. **The trust gate.** If residuals are non-trivial, the tail is mis-calibrated and no margin number is reliable.
+
+**6.2 Simulated vs historical exceedance curve.** Log-scale $P(S > x)$, simulated vs historical, **focused above \$300**, truncated at the MPC. *Shows:* the spike distribution matches reality where it matters for caps.
+
+**6.3 Backtest — realised vs predicted.** Realised capture price, realised margin and realised cap-defence outcomes vs model predictions for the same period. *Action:* the empirical credibility of the whole approach; persistent bias is a red flag.
+
+**6.4 Monte Carlo convergence / standard error.** Margin estimate ± MC standard error vs number of paths. *Action:* tells the desk whether two units' margins are *distinguishably* different or within noise.
+
+## II.7 TIER 7 — Term structure & seasonality
+
+**7.1 Margin term structure** by quarter out to the traded horizon — the tradeable shape, since caps trade by quarter.
+**7.2 Seasonality / value concentration** — a peaker's value concentrates in a few quarters, so *don't spread $N$ evenly across the year*.
+**7.3 Region / cross-asset grid** — heatmap of margin (or edge vs screen) by quarter × region × unit, for portfolio allocation and concentration detection.
+
+## II.8 From valuation to trade — five concrete decisions
+
+1. **What to sell, and how much.** Recommended $N$ = haircut to nameplate driven by the **spike capture rate (3.2)** and **CVaR limit (1.1)** — not nameplate. Over-selling manufactures the uncovered tail.
+2. **At what level.** Trade where **fair value > screen (1.2)**; breakeven premium (1.3) is the floor. The edge persists only while the reprice residual (6.1) is clean.
+3. **How to hedge the residual.** After the natural cap-short, hedge to the cap- and swap-equivalent deltas (4.3), running the delta hedge off the curves (4.2).
+4. **When to rebalance / re-mark.** Triggers: power forward ±\$X, gas ±\$Y/GJ, MLF reset, or a reprice-residual breach. The tornado (4.1) says which moves matter.
+5. **Limits and capital.** Frame limits in **CVaR** terms; account for margin/collateral on short caps against expected carry; check concentration — a peaker's cap-short correlates with every other short-cap position on the desk.
+
+**Practical constraints to surface alongside the trade:** cap-market **liquidity by quarter** (how much $N$ you can actually execute), **regional basis** if the unit sits away from the liquid reference, and **collateral usage** — a beautiful expected return that ties up disproportionate margin may lose to a thinner trade elsewhere.
+
+## II.9 The minimal viable dashboard
+
+If you build nothing else, build these six:
+
+1. **Quarterly margin distribution** (1.1) — the risk picture; the reason for the cap frame.
+2. **Value attribution waterfall** (2.1) — where the number comes from.
+3. **Capture vs baseload vs strike** (2.3) — why caps, not swaps.
+4. **Fair value vs ASX screen by quarter** (1.2) — the trade signal.
+5. **Spike capture rate + starts** (3.2 / 3.4) — the realism gate; the uncovered tail.
+6. **Tornado + cap/swap-equivalent deltas** (4.1 / 4.3) — the hedge.
+
+Tiers 5–7 are the depth you reach for when a number looks wrong or a position gets large. Tiers 1–4 are the daily desk view.
+
+## II.10 Design principles
+
+- **Decision first, diagnostics on drill-down.** Never make a trader scroll past calibration plots to find the trade.
+- **Label the measure** on every chart. The two headline numbers are not interchangeable.
+- **Distribution over point estimate**, everywhere.
+- **Tie every chart to an action.** A chart that drives no decision is noise — cut it.
+- **Reprice or it didn't happen.** A valuation that can't reproduce the traded cap and swap has no standing to claim edge against them.
+
+---
+
+# PART III — MODULE C: The hedging supply curve
+
+*Module A answers "what is this generator worth, and what is its risk." This module answers a different question:*
+
+> **At what swap strike and cap premium does a given owner become a willing seller — and at what point does it stop?** Aggregate that across the fleet and you have a **supply curve of hedging**: the volume the market's generators will sell at each price level. Overlay the ASX screen and you can read whether caps and swaps are cheap or rich relative to where generators *should* supply them, and predict where the forward curve finds support or resistance.
+
+It **reuses the same simulation engine**. The engine already produces, per generator, a distribution of quarterly margin across Monte Carlo paths. This module takes that distribution as its primary input and, instead of collapsing it to a valuation, extracts the **certainty-equivalent value of each hedge instrument** to each owner. Everything else is portfolio optimisation, aggregation, and empirical calibration on top.
+
+### Module C notation
+
+**Per-MW instrument P&L to the seller** — the building blocks, as random variables over scenarios $j$:
+
+$$\pi_{sw} = H\,(F - \bar S), \qquad \pi_{cap} = H\,(p - \bar C)$$
+
+When spot is high the swap *seller* loses on the swap leg (pays floating) and the cap *seller* pays the cap payout — but a generator's physical margin is high then, which is the entire point of the offset.
+
+**Hedged portfolio margin:**
+
+$$M_h = M_o + q_{sw}\,\pi_{sw} + q_{cap}\,\pi_{cap}$$
+
+## III.1 Step 1 — Build the per-owner *net* portfolio margin $M_o$
+
+This is the critical structural step and the one a per-asset model gets wrong. $M_o$ is the **netted** margin of everything the owner holds, simulated jointly on the same price and gas paths:
+
+$$M_o = \underbrace{\sum_{g} M_g^{\text{thermal}}}_{\text{long the peak (can defend)}} \;+\; \underbrace{M^{\text{renew}}}_{\text{long energy, NOT the peak}} \;-\; \underbrace{M^{\text{retail}}}_{\text{load: short the peak}}$$
+
+Why each term matters for cap behaviour:
+
+- **Thermal generation** has strongly positive covariance with the cap payout $\bar C$ — margin spikes exactly when $S > 300$. Natural cap **seller**.
+- **Retail load** has strongly *negative* covariance — the retailer must buy energy in the spikes, so its margin falls when caps pay. Natural cap **buyer**, short the tail.
+- **Renewables** generate energy but with low or negative correlation to scarcity: wind is often low on still evenings, solar is zero at the evening peak. They do **not** offset the retail short-peak — they *add* to it.
+
+**The netting flip.** An integrated gentailer's *net* $\mathrm{Cov}(M_o, \bar C)$ can therefore be far smaller than its standalone peaker's, or even **negative**. A per-unit view says "sell $N$ caps"; the portfolio residual may be "sell a fraction of $N$," or "**net buy**." Only the netted $M_o$ captures this, and it is the central feature of how the large NEM gentailers actually hedge. A per-asset model will predict the big gentailers *selling* caps they are in fact *buying*.
+
+Build $M_o$ as a vector of $J$ scenario values: $M_{o,j}$.
+
+For a **pure-play** generator (government peaker, merchant fund), $M_o = \sum_g M_g^{\text{thermal}}$ with no retail to net — these are the clean cap sellers, and the easiest case. They are also the ones with the thinnest financial disclosure, which is why Module D leans on the physical/bidding routes for them.
+
+## III.2 Step 2 — Construct the instrument payoff vectors
+
+From the same $J$ scenarios, compute $\bar S_j$ and $\bar C_j$, then for any candidate price level form:
+
+$$\pi_{sw,j} = H(F - \bar S_j), \qquad \pi_{cap,j} = H(p - \bar C_j)$$
+
+These, with $M_{o,j}$, are everything the optimisation needs. Pre-compute the moments once:
+
+$$\mathbb{E}[M_o],\ \mathbb{E}[\bar S],\ \mathbb{E}[\bar C],\ \mathrm{Var}[\bar S],\ \mathrm{Var}[\bar C],\ \mathrm{Cov}(M_o,\bar S),\ \mathrm{Cov}(M_o,\bar C),\ \mathrm{Cov}(\bar S,\bar C)$$
+
+## III.3 Step 3 — The objective: variance for swaps, CVaR for caps
+
+The owner maximises a risk-adjusted objective. The reservation price is the level at which the **marginal** unit of hedge has **zero** marginal certainty-equivalent benefit. Two objectives, used for two legs:
+
+**Swap leg — mean-variance.** The swap P&L is roughly symmetric, so variance is an adequate risk measure and gives a closed form:
+
+$$U = \mathbb{E}[M_h] - \tfrac{\lambda}{2}\mathrm{Var}[M_h]$$
+
+**Cap leg — mean-CVaR.** The cap payoff $\max(S-300,0)$ runs to the MPC and is wildly skewed; variance is the *wrong* measure and will over-predict supply:
+
+$$U = \mathbb{E}[M_h] - \gamma\,\mathrm{CVaR}_\alpha(-M_h)$$
+
+This hybrid is deliberate: keep the closed-form intuition where variance is valid, impose tail discipline where it is not. The Eydeland–Wolyniec load-cap result lands on caps-as-insurance precisely *because* it optimises tail loss rather than variance — it is a non-mean-variance result, and reproducing it requires a non-mean-variance objective.
+
+In the reference implementation both terms are carried simultaneously — a **mean-variance-CVaR** program — because the variance term is what produces a smooth interior supply curve while the CVaR term is what disciplines the tail. Pure CVaR alone tends to be bang-bang (zero or the constraint) since cap-selling is risk-*reducing* for a peaker up to deliverable capacity.
+
+## III.4 Step 4 — Reservation price for the swap (closed form)
+
+Optimising $U$ over $q_{sw}$, holding $q_{cap}$ fixed, gives the optimal short-swap volume:
+
+$$q_{sw}^* = \underbrace{\frac{\mathbb{E}[\pi_{sw}]}{\lambda\,\mathrm{Var}[\pi_{sw}]}}_{\text{speculative}} \;-\; \underbrace{\frac{\mathrm{Cov}(M_o,\pi_{sw})}{\mathrm{Var}[\pi_{sw}]}}_{\text{minimum-variance hedge}} \;-\; q_{cap}\frac{\mathrm{Cov}(\pi_{sw},\pi_{cap})}{\mathrm{Var}[\pi_{sw}]}$$
+
+Inverting for the **reservation price** — the swap strike $F$ at which the owner is just willing to sell the marginal MW at volume $q_{sw}$:
+
+$$\boxed{\;F^*(q_{sw}) = \mathbb{E}[\bar S] + \frac{\lambda}{H}\Big[q_{sw}\mathrm{Var}[\pi_{sw}] + q_{cap}\mathrm{Cov}(\pi_{sw},\pi_{cap}) + \mathrm{Cov}(M_o,\pi_{sw})\Big]\;}$$
+
+Using $\mathrm{Cov}(M_o, \pi_{sw}) = -H\,\mathrm{Cov}(M_o, \bar S)$, the **first-MW reservation** ($q_{sw} \to 0$, ignoring the cross-cap term):
+
+$$\boxed{\;F^*(0) = \mathbb{E}[\bar S] - \lambda\,\mathrm{Cov}(M_o,\bar S)\;}$$
+
+**Read-off.** Since $\mathrm{Cov}(M_o, \bar S) > 0$ for a generator, the owner is a willing seller **below expected spot**, by an amount that grows with risk aversion and with how well the instrument hedges its margin. As $q_{sw}$ rises, $F^*$ rises — **the supply curve slopes up**: cheap first MW, dearer later MW.
+
+For a **peaker**, $\mathrm{Cov}(M_o, \bar S)$ is *weak and noisy* — its margin tracks the tail, not the average — so its swap reservation sits close to or above expected spot. It is a **reluctant swap seller** demanding compensation for shape risk. This is the quantitative statement of the shape mismatch in §I.5.1.
+
+## III.5 Step 5 — Reservation price for the cap
+
+### The mean-variance analogue (instructive, but not what to trade on)
+
+$$p^*(0)\big|_{\text{MV}} = \mathbb{E}[\bar C] - \lambda\,\mathrm{Cov}(M_o,\bar C)$$
+
+For a peaker $\mathrm{Cov}(M_o, \bar C)$ is *large and positive*, so $p^*(0) \ll \mathbb{E}[\bar C]$: an **eager cap seller well below the expected payout**. That is the quantitative "peakers sell caps" result, and it gives the *levels*, not just the direction.
+
+**But do not use the MV version for the actual supply curve** — it ignores the tail and over-states supply. Use it as a validation overlay against the CVaR solve; the two should agree in shape, with the CVaR version pulling supply in slightly earlier because the tail term rewards the risk reduction sooner.
+
+### Rockafellar–Uryasev CVaR
+
+With scenario losses $L_j = -M_{h,j}$, CVaR at level $\alpha$ is the optimal value of a small LP:
+
+$$\mathrm{CVaR}_\alpha(L) = \min_{\zeta,\,z_j \ge 0}\; \zeta + \frac{1}{\alpha J}\sum_{j} z_j \quad\text{s.t.}\quad z_j \ge L_j - \zeta$$
+
+### The owner's program
+
+Solved per owner, per quarter/region, per candidate premium:
+
+$$\max_{q_{cap},\,q_{sw},\,\zeta,\,z_j}\quad \underbrace{\frac{1}{J}\sum_j M_{h,j}}_{\text{mean}} \;-\; \underbrace{\frac{\lambda}{2}\,\widehat{\mathrm{Var}}[M_h]}_{\text{variance}} \;-\; \underbrace{\gamma\Big(\zeta + \frac{1}{\alpha J}\sum_j z_j\Big)}_{\text{CVaR}}$$
+
+subject to
+
+$$
+\begin{aligned}
+& z_j \ge -M_{h,j} - \zeta, \quad z_j \ge 0 && \text{(CVaR linearisation)}\\
+& M_{h,j} = M_{o,j} + q_{sw}\pi_{sw,j} + q_{cap}\pi_{cap,j} && \text{(hedged margin)}\\
+& 0 \le q_{cap} \le \bar q_{cap} && \text{(deliverable / policy cap on cap volume)}\\
+& 0 \le q_{sw} \le \bar q_{sw} && \\
+& \kappa_{cap}\,q_{cap} + \kappa_{sw}\,q_{sw} \le B_{\text{collateral}} && \text{(margin/collateral budget)}\\
+& \underline h \le q / \text{generation} \le \bar h && \text{(board hedge-ratio mandate)}\\
+& q_{cap} \le \ell_{cap}(\text{quarter, region}) && \text{(market liquidity ceiling)}
+\end{aligned}
+$$
+
+Without the variance term this is a pure **LP**; with it, a **QP**. Either is solvable in milliseconds per owner.
+
+**The deliverable cap $\bar q_{cap}$ is itself an output of Module A's spike capture rate** — the haircut to nameplate reflecting outage and start reliability. Selling more caps than you can defend manufactures the uncovered tail, so the model must not let the optimiser do it. This is the single most important constraint in the program.
+
+### Extracting the supply curve
+
+Two equivalent routes:
+
+- **Parametric price sweep (preferred).** For each candidate premium $p$ on a grid, solve and record $q_{cap}^*(p)$. The mapping $q_{cap}^*(p)$ *is* the owner's cap supply curve. Embarrassingly parallel.
+- **Volume sweep with shadow price.** Fix $q_{cap}$ as an equality constraint, solve, read the dual variable — that shadow price is the reservation premium at that volume.
+
+**An implementation note that matters for speed.** The premium enters only through $H p\,q_{cap}$, which is the *same constant across every scenario $j$*. It therefore shifts the mean and the CVaR translation but **not the variance** (variance is invariant to a constant shift). Keeping the premium parameter out of the quadratic form preserves disciplined-parametric-programming compliance in the solver and lets the price sweep re-solve in milliseconds per grid point rather than recompiling each time.
+
+## III.6 Step 6 — Hedge effectiveness (which instrument the owner prefers, quantified)
+
+For each instrument, measure how much of the owner's risk it actually removes.
+
+**Variance-effectiveness (swap leg):** $\rho^2(M_o, \pi_{\text{inst}})$ — the $R^2$ of regressing margin on the instrument payoff. Equivalently the variance reduction at the min-variance hedge ratio.
+
+**Tail-effectiveness (cap leg):** the reduction in $\mathrm{CVaR}_\alpha$ per MW of hedge, $\Delta\mathrm{CVaR}/\Delta q$.
+
+For a peaker, $\rho^2(M_o, \pi_{cap})$ is high and $\rho^2(M_o, \pi_{sw})$ is low. This is the diagnostic that *quantifies* "the cap matches the asset, the swap doesn't," and it ranks instruments for each owner. Report these alongside the reservation prices — they explain *why* the supply curves sit where they do.
+
+## III.7 Step 7 — The SRMC floor (hard, behavioural)
+
+Overlay a floor the optimiser must respect: **a generator will not lock in a hedge implying a margin below its variable cost.**
+
+- **Swap backed by generation:** $F^*$ is floored near SRMC — below it, the generator would be selling forward at a loss it can avoid by simply not running.
+- **Caps:** if SRMC drifts toward \$300 (expensive gas), defending the cap becomes loss-making — $(300 - \mathrm{SRMC})$ thin or negative before MLF leakage — so the cap reservation premium rises **steeply** or the generator withdraws its offer entirely.
+
+This is the **co-spike risk of §I.8 reappearing as supply behaviour**: the cap supply curve *stiffens* precisely in the gas regimes where defence gets thin. The model produces this endogenously if gas and power are simulated jointly — the same engine requirement as Module A, which is why the coherence principle in §0.3 is load-bearing rather than decorative.
+
+## III.8 Step 8 — The per-owner supply curve
+
+Repeat Steps 2–7 across the price grid → for owner $o$, the functions $q_{cap,o}^*(p)$ and $q_{sw,o}^*(F)$.
+
+**Characteristic shape:** upward-sloping; convex near the owner's minimum-variance / min-CVaR point (cheap insurance MW first); steepening as further selling adds net short-tail risk (speculative MW only at premiums above fair value); a hard ceiling at $\bar q_{cap}$ (deliverable capacity) or at a binding collateral, liquidity or mandate constraint.
+
+## III.9 Step 9 — Aggregate to the market supply curve, add demand, find clearing
+
+### Horizontal sum across owners
+
+$$Q_{cap}^{\text{supply}}(p) = \sum_o q_{cap,o}^*(p)$$
+
+**The market is the sum of separate optimisations, not a joint solve.** A single fleet-wide MVO would internally net exposures that are actually held by different agents who cannot hedge each other. Low-SRMC, reliable, lightly-hedged peakers sit at the bottom and supply cheap; units with poor availability, high SRMC, full hedge books or tight collateral sit higher. As $p$ rises you pull progressively worse sellers in.
+
+### The demand side (symmetric)
+
+Retailers are the natural buyers. A retailer's margin has *negative* covariance with $\bar C$, so its **buying** reservation price is
+
+$$p^{\text{buy}*}_R(0) = \mathbb{E}[\bar C] - \lambda_R\,\mathrm{Cov}(M_R,\bar C) \;=\; \mathbb{E}[\bar C] + \lambda_R\,\big|\mathrm{Cov}(M_R,\bar C)\big|$$
+
+i.e. retailers are willing to pay **above** the expected payout for tail insurance — which is exactly why caps trade at a positive risk premium (§I.5.3). Build the retailer demand curve identically, through their own portfolio program, and aggregate to $Q_{cap}^{\text{demand}}(p)$.
+
+### Clearing
+
+The intersection $Q^{\text{supply}}(p) = Q^{\text{demand}}(p)$ predicts the clearing premium and volume. Overlay the ASX screen:
+
+- Screen premium near the **eager-seller floor** of the supply curve → generator-supply-abundant → likely to **soften**.
+- Screen premium **well above** where typical generators reservation-sell → supply-constrained (collateral or deliverable capacity) or retailer-bid-up → likely to **stay rich**.
+
+## III.10 Step 10 — Implied-reservation back-out (the signal)
+
+Invert the reservation equation at the observed screen premium to recover what the market is *implying* about the marginal supplier:
+
+$$\boxed{\;\lambda^{\text{impl}} = \frac{\mathbb{E}[\bar C] - p_{\text{screen}}}{\mathrm{Cov}(M_{\text{marginal}},\bar C)}\;}$$
+
+- $\lambda^{\text{impl}}$ far **below** typical risk aversion → the market is paying rich for the tail (generators should sell more; or you are being over-compensated for caps you are short).
+- $\lambda^{\text{impl}}$ implausibly **high** → caps look cheap relative to where generators would willingly supply → supply-constrained, or a buying opportunity.
+- $\lambda^{\text{impl}} < 0$ → the screen sits *above* the actuarial fair value $\mathbb{E}[\bar C]$, i.e. a positive cap risk premium is being paid. This is the normal state of the market and the sign should be read as confirmation, not as an error.
+
+Report alongside the raw **cap risk premium** $p_{\text{screen}} - \mathbb{E}[\bar C]$ in \$/MWh, which is the same information in units a desk reads instantly. This single number turns the whole apparatus into a tradeable read against the screen.
+
+## III.11 On mean-variance optimisation as the backbone
+
+The natural question is whether standard mean-variance portfolio optimisation over the whole generation portfolio, overlaid with different hedge levels, is the right way to approach this. It is the right *backbone* — but four modifications are structural rather than cosmetic:
+
+1. **Sum per-owner solves; never one fleet-wide solve.** (Step 9.) The market is many agents with different risk aversion, netting and constraints.
+2. **CVaR, not variance, on the cap leg.** (Step 3.) Variance structurally understates the risk of selling an instrument that runs to a \$23,200 MPC.
+3. **Condition the covariance matrix on regime.** A single unconditional $\Sigma$ produces "error-maximised" weights, and the correlations that matter here — gas–power co-spike — are exactly the ones that blow out in stress. Estimate $\Sigma$ conditionally, or at minimum stress it (Tier 5.3).
+4. **Overlay hard constraints, and back out $\lambda$ rather than assuming it.** Collateral budgets, board mandates and liquidity ceilings bind in practice; and the risk-aversion parameter should be *calibrated to inferred actuals* (Step 15), not asserted.
+
+Without those four, MVO gives you a mathematically clean answer to a mis-specified problem.
+
+---
+
+# PART IV — MODULE D: Position inference & calibration
+
+*Module C says what generators **should** do. This part recovers what they **did**, from public data, so the supply curve can be **calibrated** rather than asserted. Three estimators of increasing rigour, then reconciliation, then the loop that closes.*
+
+## IV.11 Step 11 — Estimator 1: financial-disclosure regression (company-level net hedge ratio)
+
+Applicable to listed gentailers (AGL, Origin) and government generators (Snowy, Stanwell, CS Energy) that publish AASB 9/7 derivative notes.
+
+### Realised-price regression
+
+Across several reporting halves:
+
+$$\frac{R_t}{Q_t} = a + b\,\bar S_t + \varepsilon_t$$
+
+where $R_t$ = disclosed wholesale revenue, $Q_t$ = generation (from accounts and/or AEMO), $\bar S_t$ = period pool average.
+
+- $b \to 1$: revenue tracks pool → **unhedged**.
+- $b \to 0$: revenue flat regardless of pool → **heavily hedged**.
+- **Hedge cover $\approx 1 - b$.**
+
+Use HAC / Newey–West standard errors — the residuals are serially correlated across reporting periods and the sample is short, so naive OLS standard errors will overstate precision.
+
+### Cash-flow hedge reserve movement
+
+A large negative movement in the hedge reserve when forwards rose implies a net short forward position:
+
+$$\Delta\text{reserve} \approx (\text{net sold notional}) \times (\text{forward move})$$
+
+summed over the curve, gives a rough net notional.
+
+### Disclosed notional by maturity band
+
+Read directly where available.
+
+### Output and limitations
+
+**Output:** company-level *net* hedge ratio and its trend.
+
+**Limitations — why this is the weakest leg for caps specifically:**
+
+- It is the **net** of generation-sold minus retail-bought.
+- It **aggregates** swaps, caps, options, gas and FX into one number.
+- It is **half-yearly** — period averaging washes out the 5-minute spikes that caps live in.
+
+Good for baseload/swap coverage and the company trend; poor for cap cover specifically. **Use it as the structural prior, not the answer.**
+
+## IV.12 Step 12 — Estimator 2: revealed defence from dispatch and bids (per-unit, lower bound)
+
+Cap hedging reveals itself in *behaviour*, and behaviour is public at unit level.
+
+**The logic.** A generator short caps must defend them, so it offers capacity at low prices in tight conditions to guarantee dispatch when price runs above \$300 — "reliability-seeking" bidding. An unhedged merchant peaker withholds or offers high to capture the spike.
+
+**From AEMO NEMWEB** — per-DUID dispatch every 5 minutes; price-quantity offer bands, with a publication delay — compute for each unit:
+
+- **Defended volume:** in scarcity / high-RRP intervals, the capacity offered *below* \$300. A revealed **lower bound** on cap cover.
+- **Spike capture rate:** the fraction of $S > 300$ intervals where the unit ran near full.
+
+**Output:** per-unit revealed minimum cap cover — the historical, real-data analogue of the spike-capture panel in Module B (Tier 3.2). Units that consistently defend are your cap sellers; the defended MW is the unit estimate.
+
+## IV.13 Step 13 — Estimator 3: bid-markup inversion (the rigorous link from data to a quantity)
+
+The cleanest theoretical route from public data to a hedge quantity, and the most assumption-hungry. **Treat its output as an estimate with a confidence band, not a number.**
+
+### The theory (Allaz–Vila / Green / Wolak)
+
+A firm with fixed-price contract cover $\bar q$ bids to maximise
+
+$$\Pi = P\,q - C(q) + (P_c - P)\,\bar q$$
+
+Offering more depresses price along its residual demand $P(q)$. The first-order condition is the contracts-adjusted Lerner relation:
+
+$$P - \mathrm{SRMC}(q) = -(q - \bar q)\,P'(q), \qquad P'(q) = \frac{1}{DR'(P)} < 0$$
+
+Inverting for contract cover:
+
+$$\boxed{\;\bar q = q - \big(P - \mathrm{SRMC}\big)\,\big|DR'(P)\big|\;}$$
+
+**Read-off.** A **fully contracted** firm ($\bar q = q$ at the margin) bids at marginal cost — zero markup, because it has already locked in revenue and just wants to be dispatched. An **under-contracted** firm with market power bids *above* SRMC ($\bar q < q$), and the size of that markup, scaled by the residual-demand slope, reveals *how* under-contracted it is.
+
+### The inputs
+
+| Input | Source |
+|---|---|
+| $q$ — dispatch | AEMO NEMWEB, per DUID, 5-minute |
+| $P$ — clearing price | AEMO NEMWEB RRP |
+| $\mathrm{SRMC}$ | your unit cost model (§I.8) |
+| $\vert DR'(P)\vert$ — residual-demand slope magnitude at the clearing point | reconstruct the bid stack: total demand minus *all other participants'* offers; read the change in net residual quantity per \$ around the clearing price |
+
+### The cap-isolation refinement — the important part
+
+A cap is not a simple fixed $\bar q$. It adds to the effective contract position **only when it binds**. So run the inversion in two price regimes:
+
+- **Below \$300:** the cap is dormant. The recovered $\bar q$ = **swap / baseload** contract cover.
+- **Above \$300** (spike intervals): the cap binds. The recovered $\bar q_{\text{eff}}$ = swap **+ cap** cover.
+
+$$\boxed{\;\widehat{q}_{cap} = \bar q_{\text{eff}}\big|_{P \ge 300} - \bar q\big|_{P < 300}\;}$$
+
+**The difference isolates the cap volume** — exactly what financial disclosures cannot give you, because they net everything. This below/above split is what turns a generic "contract cover" estimator into a *cap-cover* estimator, and it is the single most valuable trick in the inference layer.
+
+### Confidence band
+
+Bootstrap the two assumption-hungry inputs — the residual-demand slope and SRMC — and report the interval:
+
+- perturb $\vert DR'(P)\vert$ multiplicatively (e.g. 20% relative SD),
+- perturb SRMC additively (e.g. \$8/MWh SD, reflecting gas and heat-rate uncertainty),
+- re-run the inversion; report mean and 5th/95th percentiles of $\widehat{q}_{cap}$.
+
+### Caveats to state honestly
+
+The slope is noisy; the FOC assumes profit-maximising best-response behaviour that not every participant follows; and in intervals where a unit is constrained-on or constrained-off by a network constraint, the residual-demand construction is invalid and those intervals should be dropped. In practice, filter to intervals where the unit is unconstrained and marginal.
+
+## IV.14 Step 14 — Reconciliation (the cross-checks that bound the estimates)
+
+Triangulate the three estimators against each other and against hard aggregate ceilings.
+
+**1. Company netting check.** Per-unit cap + swap cover (Steps 12–13) summed across a company's fleet should reconcile, roughly, with that company's disclosed **net** notional (Step 11) *once retail is netted off*. Material divergence flags an error in one leg.
+
+**2. Open-interest ceiling.** Fleet-total inferred cap cover **cannot exceed ASX Energy cap open interest** by quarter and region, net of retailer longs and speculative positions:
+
+$$\sum_g \widehat{q}_{cap,g} \;\le\; \mathrm{OI}_{cap} - (\text{retailer long}) - (\text{spec long})$$
+
+**OI is the hard aggregate ceiling and the primary sanity bound.** It is also the cheapest high-value check in the entire build — a breach is dispositive, requires no further analysis, and will catch errors in the inference layer faster than anything else. Build it early.
+
+**3. Regulator context.** AER quarterly wholesale-market reports and occasional ACCC inquiry data give fleet-level hedging context to bound the estimates further.
+
+These three are **the credibility gate**. An inferred position set that breaches the OI ceiling or fails the company-netting reconciliation is wrong, full stop.
+
+## IV.15 Step 15 — The calibration loop (close it)
+
+This is what ties Module C to Module D and separates the framework from an academic exercise.
+
+> Tune the per-owner risk parameters ($\lambda_o$, $\gamma_o$) and the binding constraints (collateral budget, mandate bands) in the Module C reservation/supply model so that the hedging it **predicts** at observed market premiums, $q_{cap,o}^*(p_{\text{screen}})$, matches the hedging you **inferred** actually happened in Steps 12–14.
+
+Concretely, solve the inverse problem
+
+$$\min_{\{\lambda_o,\ \gamma_o,\ \text{constraints}\}} \ \sum_o \Big( q_{cap,o}^*(p_{\text{screen}}) - \widehat{q}_{cap,o} \Big)^2$$
+
+subject to the OI and reconciliation bounds of Step 14, where $\widehat q$ are the inferred actuals.
+
+### Where the loop is well-posed, and where it is not
+
+A practical subtlety the reference implementation surfaces. At a premium *above* actuarial fair value, a peaker sells to its deliverable cap almost regardless of risk aversion — cap-selling is unambiguously risk-reducing *and* profitable, so $\gamma$ saturates and calibration cannot pull the predicted position down. **The risk parameter is only well-identified in the sub-fair-value regime**, where selling is purely risk-reducing and the quantity genuinely trades off against tail exposure. Calibrate there.
+
+### The residual is the diagnostic — do not paper over it
+
+If, after tuning, the residuals stay **large and biased**, that is not a failure of fitting; it is information. It means the reservation-price framework is missing something structural. The usual suspects:
+
+- **Mechanical / policy hedging** that doesn't optimise against price at all: mandated hedge ratios ("be 70% hedged two years out"), refinancing-driven hedging, treasury programmes on a schedule.
+- **Binding non-price constraints**: collateral capacity, liquidity in that quarter/region, board concentration limits.
+- **Deliberate merchant views** — a participant holding open capacity because it *wants* the spike exposure.
+
+When an inferred position sits below what risk preferences alone predict, the gap is a constraint or a view, not a $\lambda$ to be tuned. Step 15 should be built to *expose* that residual, and to report which of the three explanations the constraint diagnostics point to.
+
+This makes the supply curve **empirically disciplined** rather than a theoretical assertion — the same role that the cap-reprice check (§I.11) plays for the margin model. **A supply curve that cannot reproduce observed hedging behaviour has no standing to predict future behaviour.**
+
+## IV.16 On inferring hedge positions from earnings reports specifically
+
+A recurring temptation is to read hedge volumes straight off financial statements. The honest summary of what that gives you:
+
+- Financials give the **net company hedge ratio** and its trend. That is genuinely useful as a prior and as a reconciliation target.
+- They are **poor for caps specifically**, because the disclosure is netted (generation short minus retail long), aggregated across instrument types, and reported half-yearly — and cap value lives in 5-minute spikes that a half-year average annihilates.
+- The better routes for caps are **physical**: AEMO dispatch and bidding behaviour (Step 12, revealed defence) and the markup inversion (Step 13), because both operate at the interval resolution where caps actually bind.
+- **Open interest** is not a position estimate for any individual participant; it is an *aggregate ceiling*. Use it as a bound, never as an allocation.
+
+The right architecture is therefore: financials as the structural prior, physical/bidding evidence as the per-unit estimator, OI as the ceiling, and the calibration loop to reconcile all three against what the supply-curve model predicts.
+
+---
+
+# PART V — MODULE E: Reference implementation
+
+A runnable Python package implementing Modules C and D against a defined engine seam, with a synthetic stub engine so the whole pipeline runs end-to-end before the production engine is wired in.
+
+## V.1 Module map — code to methodology
+
+| Methodology step | Module · function |
+|---|---|
+| **III.1–2** Engine → per-owner *netted* margin scenarios | `engine_interface.py` · `ScenarioSet`, `SyntheticEngine` |
+| **III.4** Swap reservation (closed form) | `supply_curve.py` · `swap_reservation` |
+| **III.5** Cap reservation — mean-variance reference | `supply_curve.py` · `cap_reservation_mv` |
+| **III.5** Cap program — mean-variance-CVaR QP | `supply_curve.py` · `CapCVaRProblem` |
+| **III.6** Hedge effectiveness ($\rho^2$) | `supply_curve.py` · `hedge_effectiveness` |
+| **III.8** Price sweep → per-owner supply curve | `supply_curve.py` · `cap_supply_curve` (+ `_mv` cross-check) |
+| **III.9** Horizontal aggregation, demand, clearing | `aggregation.py` · `fleet_supply`, `fleet_demand`, `clearing` |
+| **III.10** Implied-reservation back-out | `aggregation.py` · `implied_lambda` |
+| **IV.11** Financial-disclosure regression | `inference.py` · `financial_hedge_ratio` |
+| **IV.12** Revealed defence from dispatch/bids | `inference.py` · `revealed_defence` |
+| **IV.13** Bid-markup inversion (below/above \$300) | `inference.py` · `markup_inversion`, `markup_inversion_ci` |
+| **IV.14** Open-interest reconciliation | `inference.py` · `reconcile_open_interest` |
+| **IV.15** Calibration loop | `calibration.py` · `calibrate_gamma` |
+
+## V.2 The single seam
+
+Everything downstream consumes **one object** — `ScenarioSet` — holding, for one quarter/region and $J$ Monte Carlo scenarios:
+
+```python
+ScenarioSet(
+    Sbar:    np.ndarray,   # [J] quarter average RRP per scenario           ($/MWh)
+    Cbar:    np.ndarray,   # [J] quarter average $300-cap payout per MWh    ($/MWh)
+    margins: dict,         # owner_name -> [J] NET portfolio margin          ($)
+    hours:   float,        # H, hours in the quarter
+)
+```
+
+To integrate the production engine, replace `SyntheticEngine.run(...)` with an adapter that fills these three arrays from the engine's per-owner **netted** margin distribution — generation $+$ renewables $-$ retail, simulated on the *same* price/gas paths (Step 1). That is the only integration point; nothing else changes.
+
+```python
+# your_engine_adapter.py
+def build_scenarioset(quarter, region) -> ScenarioSet:
+    sims = your_engine.simulate(quarter, region)            # your code
+    return ScenarioSet(
+        quarter=quarter, region=region,
+        Sbar=sims.quarter_avg_rrp,                          # [J]
+        Cbar=np.maximum(sims.rrp_5min - 300, 0).mean(1),    # [J]
+        margins={o: sims.net_margin[o] for o in sims.owners},
+    )
+```
+
+## V.3 Design decisions that are load-bearing
+
+**Per-owner solves, summed horizontally.** `fleet_supply` / `fleet_demand` loop over owners and sum the resulting curves. There is deliberately no fleet-wide joint solve anywhere in the codebase.
+
+**Mean-variance-CVaR, not plain mean-variance.** The objective carries both a variance term and a Rockafellar–Uryasev CVaR term. The variance term produces a smooth interior supply curve; the CVaR term disciplines the tail. Pure CVaR alone is bang-bang for a peaker, because cap-selling is risk-*reducing* up to deliverable capacity.
+
+**The premium stays out of the quadratic.** Because $H p\,q_{cap}$ is constant across scenarios, it shifts the mean and CVaR but not the variance. Keeping the premium `Parameter` out of the `sum_squares` term preserves DPP compliance and lets the price sweep re-solve in milliseconds per grid point. **If you add instruments later, preserve this property or the sweep slows by orders of magnitude.**
+
+**Margins scaled to \$m inside the solver** for conditioning; the risk weight is rescaled correspondingly.
+
+**Three risk knobs, deliberately separate.** `risk_aversion` ($\lambda$, \$$^{-1}$) drives the closed-form reservations; `tail_weight` ($\gamma$) drives the CVaR term; `var_weight` ($\lambda$ in \$m units, auto-derived) drives the QP variance term. Step 15 calibrates $\gamma$ — or, where the position is constraint-bound rather than risk-bound, identifies the binding constraint instead.
+
+**The netting flip is emergent, not hardcoded.** The gentailer is declared as thermal capacity plus a retail book; the code *computes* $\mathrm{Cov}(M, \bar C)$ from the simulated margins and that is what places it on the demand side. When the real engine is swapped in, the flip (or non-flip) falls out of actual portfolios — which is precisely the per-asset error the model exists to avoid, now load-bearing in code rather than in commentary.
+
+## V.4 Verified behaviour (synthetic engine, end-to-end run)
+
+The demo runs the full pipeline and reproduces every headline result of the methodology.
+
+**Engine scale** (tuned to realistic NEM levels): $\mathbb{E}[\bar S] = \$97.3$/MWh, $\mathbb{E}[\bar C] = \$10.20$/MWh, $P_{95}[\bar C] = \$26.9$/MWh.
+
+**Step 1 — the netting flip:**
+
+| Owner | Composition | $\mathrm{Cov}(M,\bar C)/10^6$ | Side |
+|---|---|---|---|
+| PeakerLow | 300 MW thermal, SRMC 140 | **+50.8** | cap SELLER |
+| PeakerHigh | 250 MW thermal, SRMC 230 | **+41.9** | cap SELLER |
+| Gentailer | 600 MW thermal + 600 MW renew − 1400 MW retail | **−76.8** | cap **BUYER** — the flip |
+| BigRetailer | 1500 MW retail | −246.7 | cap BUYER |
+
+The gentailer owns 600 MW of peaking thermal yet comes out a **net cap buyer** once its retail book nets in. A per-asset model would put it on the supply side and be wrong about the largest participants in the market.
+
+**Steps 4–6 — reservations and effectiveness:**
+
+| Owner | Cap reservation | $\rho^2_{cap}$ | $\rho^2_{swap}$ |
+|---|---|---|---|
+| PeakerLow | sell @ ≤ \$7.16 | 0.80 | 0.64 |
+| PeakerHigh | sell @ ≤ \$7.69 | 1.00 | 0.28 |
+| Gentailer | **buy** @ ≥ \$13.27 | 0.08 | 0.88 |
+
+Peakers reservation-sell *below* $\mathbb{E}[\bar C] = \$10.20$; the gentailer's buy reservation sits *above* it — it pays up for insurance. High $\rho^2_{cap}$ with low $\rho^2_{swap}$ is the quantitative "the cap matches the asset" result.
+
+**Steps 8–10 — supply curves and clearing.** QP supply curves rise smoothly from zero and saturate at deliverable capacity, agreeing in shape with the closed-form mean-variance overlay (the QP pulls supply in slightly earlier, as expected from the tail term). At a \$16 screen: fleet supply 497 MW against demand 774 MW; predicted clearing \$17.8/MWh at 500 MW. Cap risk premium $p_{\text{screen}} - \mathbb{E}[\bar C] = +\$5.80$/MWh; implied $\lambda = -1.14\times10^{-7}$, the negative sign confirming the screen sits above actuarial fair value.
+
+**Steps 11–14 — inference:**
+
+| Estimator | Planted truth | Recovered |
+|---|---|---|
+| Financial regression (Step 11) | cover 0.70 | **0.72** (slope 0.28) |
+| Markup inversion, below \$300 (Step 13) | swap 120 | **120.0** |
+| Markup inversion, above \$300 (Step 13) | total 200 | **200.0** |
+| **Cap cover by difference** (Step 13) | **cap 80** | **80.0**, 90% CI [76, 85] |
+| OI reconciliation (Step 14) | ceiling 480 | inferred 340, headroom 140 → OK |
+
+The exact recovery of the planted cap position validates the below/above-\$300 split. Note that the synthesis constructs two cleanly separated regimes so that the realised-price split coincides with the planted cover; on real AEMO data it will not be that clean, which is exactly why `markup_inversion_ci` bootstraps the slope and SRMC. **Always report the band, never the point.**
+
+**Step 15 — calibration.** Targeting an inferred 150 MW at a \$8 premium (the sub-fair-value regime where $\gamma$ is identified): $\gamma^* = 0.186$, fitted 150.1 MW, residual 0.13 MW. At a premium above fair value the same solve saturates, which the code reports as the diagnostic described in §IV.15.
+
+## V.5 Install and run
+
+```
+pip install cvxpy numpy scipy matplotlib
+python demo.py
+```
+
+CLARABEL ships with cvxpy and handles the QP; SCS is a fallback.
+
+```
+engine_interface.py   data contracts + synthetic stub engine     (Steps 1-2; THE SEAM)
+supply_curve.py       moments, reservations, QP, price sweep     (Steps 4-6, 8)
+aggregation.py        fleet aggregation, demand, clearing, λ     (Steps 9-10)
+inference.py          the three estimators + OI reconciliation   (Steps 11-14)
+calibration.py        tune γ to match inferred actuals           (Step 15)
+demo.py               end-to-end run + 3 charts
+```
+
+## V.6 Production notes
+
+- Swap the synthetic spike process for the engine's **joint gas–power simulation**, so the cap supply curve stiffens endogenously in tight-gas regimes (§III.7).
+- The **residual-demand slope** in `markup_inversion` is the assumption-hungry input. Estimate it from the reconstructed AEMO bid stack, filter to unconstrained-and-marginal intervals, and always report the CI.
+- Wire the **OI ceiling** in early. Cheapest high-value check in the build.
+- Extend the `ScenarioSet` to carry a scenario-indexed **SRMC** vector if you want the Step 7 SRMC floor to bind scenario-by-scenario rather than as a static overlay.
+
+---
+
+# PART VI — Cross-cutting: pitfalls, gates, data and build order
+
+## VI.1 The pitfalls that actually change answers
+
+| # | Pitfall | Consequence | Fix |
+|---|---|---|---|
+| 1 | **Variance on the cap leg** | over-predicts hedging supply; understates tail risk | CVaR (§III.3). Single most consequential modelling choice in Module C |
+| 2 | **Fleet-wide joint MVO** instead of summed per-owner solves | nets exposures across agents who cannot hedge each other | horizontal aggregation (§III.9) |
+| 3 | **Per-asset $M$** instead of netted portfolio | misses the retail/renewable offset that defines gentailer cap behaviour; predicts the biggest players on the wrong side | netted $M_o$ (§III.1) |
+| 4 | **Perfect-foresight dispatch** | inflates value by the amount of optionality you don't have | non-anticipative policy (§I.7) |
+| 5 | **Netting lumpy costs ex post** while dispatching on SRMC | wrong run *pattern*, not just wrong total | DP/UC with commitment state (§I.7.3) |
+| 6 | **Independent gas and power simulation** | misses the co-spike that compresses defence exactly when caps pay | joint simulation (§I.8, §0.3) |
+| 7 | **Single unconditional covariance matrix** | "error-maximised" weights; the correlations that matter blow out in stress | condition $\Sigma$ on regime (§III.11) |
+| 8 | **Selling caps at nameplate** | manufactures the uncovered tail | $\bar q_{cap}$ = capture-rate haircut (§I.3, §III.5) |
+| 9 | **Conflating \$300 strike with the \$600 APC** | mis-specified payoff and mis-specified rails | §I.6 |
+| 10 | **Assuming $\lambda$** rather than backing it out | an asserted curve with no empirical standing | calibrate to inferred actuals (§IV.15) |
+| 11 | **Treating inferred positions as fact** | false precision on the most assumption-hungry estimator | report bands; lean on physical routes for caps (§IV.13) |
+| 12 | **Ignoring the demand side** | you have only the supply blade; can't predict the transacted level | retailer demand curve (§III.9) |
+| 13 | **Ignoring MLF on the cap leg** | "covered" positions look like a perfect \$300 lock when they leak $(1-L)S$ | §I.4 |
+| 14 | **Staleness corrections on marked back contracts** | can manufacture the comovement you were removing | §I.9 caveat |
+
+## VI.2 Consolidated validation gates
+
+Nothing downstream is trustworthy until these pass.
+
+**Module A (valuation):**
+- Cap reprice: simulated cap distribution reproduces traded $p_Q$ under the pricing measure.
+- Swap reprice: time-weighted simulated mean reproduces $F_Q$.
+- Exceedance curve: simulated $P(S > x)$ matches historical above \$300, truncated at MPC.
+- Bound check: realistic-policy value $\le$ constrained-SDP $\le$ unconstrained strip.
+- Defence sanity: modelled spike behaviour is physically achievable for the unit.
+
+**Module C (supply curve):**
+- Supply curve monotone increasing in price and bounded by deliverable capacity.
+- QP solution agrees in shape with the closed-form mean-variance overlay.
+- Retailer buy-reservations sit *above* $\mathbb{E}[\bar C]$; generator sell-reservations *below* it.
+
+**Module D (inference):**
+- **OI ceiling never breached** by summed inferred or predicted cap supply.
+- Company-netting reconciliation within tolerance.
+- Markup inversion recovers a planted position on synthetic data before being trusted on real data.
+- Calibration residual small and unbiased — or, if not, attributed to a named constraint rather than absorbed into $\lambda$.
+
+## VI.3 Data sources
+
+| Input | Source | Used in |
+|---|---|---|
+| Per-DUID 5-min dispatch | AEMO NEMWEB (DISPATCH) | I.7 backtest, IV.12, IV.13 |
+| Price-quantity offer bands per DUID | AEMO NEMWEB (bidding, delayed) | IV.12, IV.13 |
+| Regional reference prices (RRP), 5-min | AEMO NEMWEB | engine, IV.12, IV.13 |
+| Constraint formulations / binding constraints | AEMO MMS, CIG & Constraint Naming Guidelines | residual-demand construction, dispatch realism |
+| ASX swap & \$300 cap forwards, **open interest** | ASX Energy | I.9 calibration, III.9, III.10, IV.14 |
+| Derivative notes, hedge reserve, segment revenue | company annual / half-year reports | IV.11 |
+| Fleet hedging context | AER quarterly reports, ACCC inquiries | IV.14 |
+| MLFs | AEMO (annual) | I.4, SRMC referencing |
+| Delivered gas (hub + transport) | STTM / Wallumbilla / Victorian hub, pipeline tariffs | I.8, III.7 |
+| Unit technical parameters | heat rate, VOM, FOM, start cost, ramp, min up/down, capacity, FOR | engine, $\bar q_{cap}$ |
+
+## VI.4 Computational structure
+
+1. **Simulate once.** The engine produces, per owner, the scenario matrix $M_{o,j}$ and the shared $\bar S_j$, $\bar C_j$ vectors. One simulation, all downstream uses.
+2. **Per-owner program.** $J + 2$ variables and $\sim J$ constraints — milliseconds in any LP/QP solver (CLARABEL, HiGHS, Gurobi).
+3. **Price sweep.** Loop the program over the premium grid — embarrassingly parallel, and fast if DPP is preserved (§V.3).
+4. **Aggregate.** Horizontal sum across owners; build the retailer demand side identically.
+5. **Inference offline.** Steps 11–13 run on historical AEMO and financial data, independent of the simulation, producing the $\widehat q$ actuals.
+6. **Calibrate.** An outer optimisation over $\{\lambda_o, \gamma_o\}$ wrapping the sweep — a handful of iterations.
+
+**Keep the modules separate.** They have different refresh cadences: the margin and supply views refresh with the screen; inference refreshes with each AEMO and financial data drop; calibration refreshes on a slower cycle.
+
+## VI.5 Suggested build order
+
+1. **SRMC and cost stack** (§I.8) — everything references it, and the two-threshold framing must be right before dispatch is written.
+2. **Price simulator with joint gas**, calibrated level-then-tail (§I.9). Gate on the cap reprice check before proceeding.
+3. **Non-anticipative commitment + dispatch** (§I.7), starting with the heuristic rule; upgrade to DP once the heuristic is validated against realised plant behaviour.
+4. **Master margin equation and outputs** (§I.1, §I.10) — the distribution, not the mean.
+5. **The minimal six dashboard charts** (§II.9). Stop here and you already have a defensible desk tool.
+6. **Netted per-owner margin $M_o$** (§III.1) — the piece that inverts the answer for the largest participants. Get it right before building any supply curve on top.
+7. **Per-owner mean-var-CVaR program and price sweep** (§III.5, §III.8).
+8. **OI ceiling check** (§IV.14) — trivially cheap, catches errors in everything downstream.
+9. **Markup inversion with the below/above split** (§IV.13), validated on synthetic planted positions first.
+10. **Aggregation, demand side, clearing, implied $\lambda$** (§III.9, §III.10).
+11. **Calibration loop** (§IV.15) — and take the residual seriously.
+
+---
+
+# APPENDIX A — Master equation reference card
+
+**Per-interval margin (Module A):**
+$$\pi_i = \Delta t\Big[G_i(L S_i - \mathrm{SRMC}_i) - N\max(S_i-K,0) + N p\Big]$$
+
+**Quarterly margin:**
+$$\Pi = \sum_i \pi_i - \sum_{\text{starts}}\mathrm{SC} - \mathrm{FOM}$$
+
+**Covered / uncovered decomposition:**
+$$G S - N(S-K) = K G - (N-G)(S-K)$$
+
+**Defended spike with MLF:**
+$$L N S - N(S-K) = N\big(K - (1-L)S\big)$$
+
+**Capture price and merchant energy margin:**
+$$P_{\text{cap}} = \frac{\sum_i S_i G_i}{\sum_i G_i}, \qquad \sum_i G_i \Delta t (L S_i - \mathrm{SRMC}) = E(L P_{\text{cap}} - \mathrm{SRMC})$$
+
+**SRMC:**
+$$\mathrm{SRMC}_i = \mathrm{HR}(G_i)(P^{\text{gas}}_i + T^{\text{gas}}) + \mathrm{VOM}, \qquad \mathrm{HR} = 3.6/\eta$$
+
+**Commitment (heuristic start rule):**
+$$\text{start if } q\cdot\Delta\cdot(\text{deliverable MW}) > \mathrm{SC} + \mathbb{E}[\text{min-load loss over }\tau_{\text{start}}]$$
+
+**Cap-leg risk premium:**
+$$N H\big(p - \mathbb{E}_P[\max(S-K,0)]\big)$$
+
+**Instrument P&L to the seller (Module C):**
+$$\pi_{sw} = H(F - \bar S), \qquad \pi_{cap} = H(p - \bar C), \qquad M_h = M_o + q_{sw}\pi_{sw} + q_{cap}\pi_{cap}$$
+
+**Netted owner margin:**
+$$M_o = \sum_g M_g^{\text{thermal}} + M^{\text{renew}} - M^{\text{retail}}$$
+
+**Swap reservation:**
+$$F^*(q_{sw}) = \mathbb{E}[\bar S] + \frac{\lambda}{H}\Big[q_{sw}\mathrm{Var}[\pi_{sw}] + q_{cap}\mathrm{Cov}(\pi_{sw},\pi_{cap}) + \mathrm{Cov}(M_o,\pi_{sw})\Big]$$
+$$F^*(0) = \mathbb{E}[\bar S] - \lambda\,\mathrm{Cov}(M_o,\bar S)$$
+
+**Cap reservation (mean-variance reference):**
+$$p^*(0) = \mathbb{E}[\bar C] - \lambda\,\mathrm{Cov}(M_o,\bar C)$$
+
+**Retailer buy reservation:**
+$$p^{\text{buy}*}_R(0) = \mathbb{E}[\bar C] + \lambda_R\big|\mathrm{Cov}(M_R,\bar C)\big|$$
+
+**CVaR (Rockafellar–Uryasev):**
+$$\mathrm{CVaR}_\alpha(L) = \min_{\zeta, z_j\ge 0}\ \zeta + \frac{1}{\alpha J}\sum_j z_j \quad \text{s.t.}\quad z_j \ge L_j - \zeta$$
+
+**Owner's program:**
+$$\max\ \frac{1}{J}\sum_j M_{h,j} - \frac{\lambda}{2}\widehat{\mathrm{Var}}[M_h] - \gamma\Big(\zeta + \frac{1}{\alpha J}\sum_j z_j\Big)$$
+
+**Fleet aggregation:**
+$$Q^{\text{supply}}_{cap}(p) = \sum_o q^*_{cap,o}(p)$$
+
+**Implied reservation:**
+$$\lambda^{\text{impl}} = \frac{\mathbb{E}[\bar C] - p_{\text{screen}}}{\mathrm{Cov}(M_{\text{marginal}},\bar C)}$$
+
+**Financial-disclosure regression (Module D):**
+$$R_t/Q_t = a + b\bar S_t + \varepsilon_t, \qquad \text{hedge cover} \approx 1 - b$$
+
+**Markup inversion:**
+$$\bar q = q - (P - \mathrm{SRMC})\,|DR'(P)|$$
+$$\widehat q_{cap} = \bar q_{\text{eff}}\big|_{P\ge300} - \bar q\big|_{P<300}$$
+
+**OI ceiling:**
+$$\sum_g \widehat q_{cap,g} \le \mathrm{OI}_{cap} - \text{retailer long} - \text{spec long}$$
+
+**Calibration:**
+$$\min_{\{\lambda_o,\gamma_o\}}\ \sum_o\big(q^*_{cap,o}(p_{\text{screen}}) - \widehat q_{cap,o}\big)^2 \quad \text{s.t. Step 14 bounds}$$
+
+---
+
+# APPENDIX B — Current NEM parameters
+
+As at mid-2026. **Refresh annually** — MPC steps each financial year and MLFs are republished annually.
+
+| Parameter | Value | Note |
+|---|---|---|
+| Market Price Cap (MPC) | \$20,300/MWh FY2025-26 → \$23,200/MWh from 1 Jul 2026 | further step FY2027-28 |
+| Market Floor | −\$1,000/MWh | |
+| Administered Price Cap (APC) | \$600/MWh | **not** \$300 — that is the ASX cap strike |
+| Cumulative Price Threshold (CPT) | ≈ \$2.23M | rolling 7-day window |
+| ASX cap strike $K$ | \$300/MWh | product convention, unrelated to APC |
+| Settlement | 5-minute (5MS) | |
+| Hours per quarter $H$ | ≈ 2184 | 91 days |
+| Interval $\Delta t$ | 1/12 h | |
+| OCGT heat rate | ≈ 10.9 GJ/MWh ($\eta \approx 33\%$) | full load; worse at part load |
+| CCGT heat rate | ≈ 7.2 GJ/MWh ($\eta \approx 50\%$) | |
+| Regions | NSW, QLD, VIC, SA (and TAS) | caps/swaps are quarterly × region |
+
+---
+
+# APPENDIX C — The whole thing in one paragraph
+
+Value each NEM gas generator as **merchant energy margin at its generation-weighted capture price, plus cap-premium carry, minus expected cap payouts, minus commitment drag** — computed on 5-minute joint power–gas paths whose level is calibrated to the ASX swap and whose tail is calibrated to the \$300 cap, dispatched under a forecast-driven non-anticipative commitment policy so optionality is not overstated, and reported as a *distribution* whose left tail is the uncovered-spike risk that dominates the economics. Present it to the desk decision-first across seven tiers, keeping risk-neutral fair value and physical expected margin explicitly separate, because their gap *is* the risk premium being earned. Then, to predict where hedges will actually trade, take each **owner's netted** portfolio margin — thermal plus renewables minus retail, which is what flips integrated gentailers from cap sellers to cap buyers — and solve a **per-owner mean-variance-CVaR program** under deliverable-capacity, collateral, mandate and liquidity constraints; sweep the offered price to trace that owner's reservation-price-as-a-function-of-volume, sum **horizontally** across owners rather than solving the fleet jointly, add the symmetric retailer demand side, and read the clearing premium against the ASX screen via the implied-$\lambda$ back-out. Finally, **calibrate the whole apparatus** by inferring what generators actually hedged — company net ratios from financial disclosures as the structural prior, per-unit cap defence from AEMO dispatch and bids, and per-unit cap cover from a **markup inversion run separately below and above \$300** to isolate caps from swaps — reconciled against open interest as the hard aggregate ceiling, tuning each owner's risk aversion in the sub-fair-value regime where it is identified, and treating any large biased residual not as fitting error but as evidence of mechanical hedging or a binding non-price constraint. The result is a margin model that surfaces the risk the flat-swap frame structurally cannot show, and a hedging supply curve that is theoretically grounded *and* empirically disciplined — turning the ASX screen into a read on whether caps are cheap or rich relative to where the fleet will actually supply them.
